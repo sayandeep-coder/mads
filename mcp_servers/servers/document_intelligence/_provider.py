@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import zipfile
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
@@ -10,17 +11,22 @@ from mcp import Tool
 
 from config.settings import Settings
 from mcp_servers.manager import ToolCallResult
-from mcp_servers.servers.document_intelligence import _compare, _docx, _pdf, _pdf_writer, _xlsx
+from mcp_servers.servers.document_intelligence import _compare, _docx, _pdf, _pdf_writer, _pptx_writer, _xlsx
 from mcp_servers.servers.document_intelligence._paths import resolve_allowed_path, resolve_allowed_write_path
 from mcp_servers.servers.document_intelligence._schemas import DOCUMENT_TOOLS
 
 logger = logging.getLogger(__name__)
 
 _PDF_MAGIC = b"%PDF-"
+_ZIP_MAGIC = b"PK\x03\x04"
 
 
 class PdfGenerationError(RuntimeError):
     """Raised when a generated PDF fails validation (doesn't start with the PDF magic bytes)."""
+
+
+class PptxGenerationError(RuntimeError):
+    """Raised when a generated PPTX fails validation (not a valid ZIP/OOXML package)."""
 
 
 def _read_text_for_compare(path: Path) -> str:
@@ -105,6 +111,25 @@ class DocumentIntelligenceProvider:
                 )
 
             return {"path": str(path), "size_bytes": path.stat().st_size, "valid_pdf": True}
+
+        if name == "create_presentation":
+            path = resolve_allowed_write_path(self._settings, arguments["path"])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _pptx_writer.create_presentation(path, arguments["slides"], arguments.get("accent_color"))
+
+            with path.open("rb") as f:
+                header = f.read(len(_ZIP_MAGIC))
+            if header != _ZIP_MAGIC or not zipfile.is_zipfile(path):
+                raise PptxGenerationError(
+                    f"Generated file at {path} is not a valid ZIP/OOXML package; the file is not a valid PPTX."
+                )
+
+            return {
+                "path": str(path),
+                "size_bytes": path.stat().st_size,
+                "slide_count": len(arguments["slides"]),
+                "valid_pptx": True,
+            }
 
         if name == "compare_documents":
             path_a = resolve_allowed_path(self._settings, arguments["path_a"])

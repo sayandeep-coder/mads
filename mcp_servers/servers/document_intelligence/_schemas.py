@@ -81,6 +81,42 @@ DOCUMENT_TOOLS = [
         },
     ),
     Tool(
+        name="create_presentation",
+        description=(
+            "Generate a real, professional PowerPoint (.pptx) deck from a list of slides. Use this "
+            "whenever asked to create a presentation, slide deck, or PPT — for example a project "
+            "update, pitch, or executive review. Supports a mix of slide types in one deck: "
+            "\n- 'title': {title, subtitle} — opening slide."
+            "\n- 'section': {title} — a divider slide marking a new section."
+            "\n- 'bullets': {title, bullets: [str, ...]} — title + bulleted content."
+            "\n- 'table': {title, headers: [str,...], rows: [[str,...], ...]} — a real editable table."
+            "\n- 'chart': {title, chart_type: 'bar'|'line'|'pie', categories: [str,...], series: "
+            "{seriesName: [number,...]}} — a real editable native chart, not an image."
+            "\n- 'comparison': {title, left: {heading, points:[str,...]}, right: {heading, "
+            "points:[str,...]}} — two-column side-by-side comparison."
+            "\nAll text fields support '**bold**' inline formatting. Bullets and comparison points "
+            "also support '#'/'##' hierarchy and optional '-'/'*' bullet prefixes."
+            "\nBuild a deck that mixes whatever slide types best fit the content — a real deck rarely "
+            "uses only one type."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Where to save the deck, e.g. '~/review.pptx'."},
+                "slides": {
+                    "type": "array",
+                    "description": "Ordered list of slide specs, each with a 'type' field as described above.",
+                    "items": {"type": "object"},
+                },
+                "accent_color": {
+                    "type": "string",
+                    "description": "Hex accent color for the deck's theme, e.g. '#2D5BFF'. Defaults to a professional blue if omitted.",
+                },
+            },
+            "required": ["path", "slides"],
+        },
+    ),
+    Tool(
         name="compare_documents",
         description=(
             "Compare two documents (PDF, DOCX, or plain text files) and return a unified diff of "

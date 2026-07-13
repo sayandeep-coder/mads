@@ -13,10 +13,13 @@ from mcp_servers.servers import context7 as context7_server
 from mcp_servers.servers import fetch as fetch_server
 from mcp_servers.servers import filesystem as filesystem_server
 from mcp_servers.servers import github as github_server
+from mcp_servers.servers import maps as maps_server
+from mcp_servers.servers import search as search_server
 from mcp_servers.servers import spotify as spotify_server
 from mcp_servers.servers import youtube as youtube_server
 from mcp_servers.servers.document_intelligence import DocumentIntelligenceProvider
 from mcp_servers.servers.google_workspace import GoogleWorkspaceProvider
+from mcp_servers.servers.image import ImageProvider
 from mcp_servers.servers.system import SystemProvider
 from memory.provider import MemoryProvider
 from memory.recall import build_recall_summary
@@ -47,9 +50,14 @@ def _build_providers(settings: Settings) -> list[ToolProvider]:
         providers.append(youtube_server.YouTubeProvider(settings))
     if spotify_server.SpotifyProvider.is_available(settings):
         providers.append(spotify_server.SpotifyProvider(settings))
+    if search_server.SearchProvider.is_available(settings):
+        providers.append(search_server.SearchProvider(settings))
+    if maps_server.MapsProvider.is_available(settings):
+        providers.append(maps_server.MapsProvider(settings))
     providers.append(DocumentIntelligenceProvider(settings))
     providers.append(MemoryProvider(settings))
     providers.append(SystemProvider(settings))
+    providers.append(ImageProvider(settings))
     return providers
 
 
@@ -61,9 +69,12 @@ _KNOWN_SERVER_NAMES = [
     "google_workspace",
     "youtube",
     "spotify",
+    "search",
+    "maps",
     "document_intelligence",
     "memory",
     "system",
+    "image",
 ]
 
 
