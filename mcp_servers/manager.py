@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
@@ -56,7 +57,15 @@ class StdioToolProvider:
         return self._name
 
     async def connect(self, exit_stack: AsyncExitStack) -> None:
-        read, write = await exit_stack.enter_async_context(stdio_client(self._params))
+        if logger.isEnabledFor(logging.DEBUG):
+            transport = stdio_client(self._params)
+        else:
+            # MCP servers commonly print startup banners and routine INFO logs to
+            # stderr. Keep the normal UI quiet; DEBUG mode restores that output.
+            errlog = exit_stack.enter_context(open(os.devnull, "w"))
+            transport = stdio_client(self._params, errlog=errlog)
+
+        read, write = await exit_stack.enter_async_context(transport)
         session = await exit_stack.enter_async_context(ClientSession(read, write))
         await session.initialize()
 
@@ -118,7 +127,7 @@ class MCPManager:
             self._tools[tool.name] = tool
 
         self._providers[provider.name] = provider
-        logger.info("Connected provider %r with %d tool(s)", provider.name, len(tools))
+        logger.debug("Connected provider %r with %d tool(s)", provider.name, len(tools))
 
     def list_tools(self) -> list[Tool]:
         return list(self._tools.values())

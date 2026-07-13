@@ -84,15 +84,14 @@ def delete_files(settings: Settings, paths: list[str], confirmed: bool = False) 
     if gate:
         return gate
 
-    root = settings.filesystem_root
     deleted: list[str] = []
     errors: list[dict[str, str]] = []
 
     for raw_path in paths:
         resolved = Path(raw_path).expanduser().resolve()
 
-        if resolved != root and root not in resolved.parents:
-            errors.append({"path": raw_path, "error": f"Outside allowed directory {root}"})
+        if not settings.is_path_allowed(resolved):
+            errors.append({"path": raw_path, "error": f"Outside allowed directories {settings.allowed_roots}"})
             continue
         if not resolved.exists():
             errors.append({"path": raw_path, "error": "No such file or directory"})
