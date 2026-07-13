@@ -31,6 +31,8 @@ class Settings:
     spotify_client_id: str | None
     spotify_client_secret: str | None
     spotify_redirect_uri: str | None
+    serpapi_api_key: str | None
+    google_maps_api_key: str | None
 
     filesystem_root: Path
 
@@ -67,6 +69,8 @@ def get_settings() -> Settings:
         spotify_client_id=_optional("SPOTIFY_CLIENT_ID"),
         spotify_client_secret=_optional("SPOTIFY_CLIENT_SECRET"),
         spotify_redirect_uri=_optional("SPOTIFY_REDIRECT_URI"),
+        serpapi_api_key=_optional("SERPAPI_API_KEY"),
+        google_maps_api_key=_optional("GOOGLE_MAPS_API_KEY"),
         filesystem_root=Path(
             os.environ.get("FILESYSTEM_ROOT", str(Path.home()))
         ).expanduser().resolve(),
