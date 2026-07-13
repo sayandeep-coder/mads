@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -35,6 +35,34 @@ class Settings:
     google_maps_api_key: str | None
 
     filesystem_root: Path
+
+    def with_filesystem_root(self, root: Path) -> "Settings":
+        """Return a copy of these settings scoped to a different filesystem root.
+
+        Used when a project is active: the filesystem MCP server, document
+        tools, and shell tools should all resolve paths relative to the
+        project's folder instead of the global FILESYSTEM_ROOT default.
+        """
+        return replace(self, filesystem_root=root)
+
+    @property
+    def allowed_roots(self) -> tuple[Path, ...]:
+        """All directories filesystem-touching tools may read/write under.
+
+        Always includes filesystem_root (the active project's folder, or
+        the global default) plus the home directory unconditionally — so
+        sibling folders outside the active project (e.g. ~/mads_works while
+        a narrower project is active) stay reachable without a config
+        change. Single source of truth: the Filesystem MCP server, document
+        tools, and destructive shell operations all resolve against this.
+        """
+        home = Path.home().resolve()
+        if self.filesystem_root == home:
+            return (self.filesystem_root,)
+        return (self.filesystem_root, home)
+
+    def is_path_allowed(self, path: Path) -> bool:
+        return any(path == root or root in path.parents for root in self.allowed_roots)
 
 
 def _require(name: str) -> str:

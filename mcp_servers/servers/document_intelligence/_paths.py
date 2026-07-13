@@ -10,17 +10,16 @@ class PathNotAllowedError(ValueError):
 
 
 def resolve_allowed_path(settings: Settings, path: str) -> Path:
-    """Resolve a user-supplied path and ensure it stays within the allowed filesystem root.
+    """Resolve a user-supplied path and ensure it stays within an allowed root.
 
     Mirrors the same boundary the Filesystem MCP server enforces, so
     document reading can't be used to reach files outside the sanctioned
-    directory tree.
+    directory trees.
     """
     resolved = Path(path).expanduser().resolve()
-    root = settings.filesystem_root
 
-    if resolved != root and root not in resolved.parents:
-        raise PathNotAllowedError(f"Path {path!r} is outside the allowed directory {root}")
+    if not settings.is_path_allowed(resolved):
+        raise PathNotAllowedError(f"Path {path!r} is outside the allowed directories {settings.allowed_roots}")
 
     if not resolved.exists():
         raise FileNotFoundError(f"No such file: {resolved}")
@@ -34,9 +33,8 @@ def resolve_allowed_write_path(settings: Settings, path: str) -> Path:
     file to already exist.
     """
     resolved = Path(path).expanduser().resolve()
-    root = settings.filesystem_root
 
-    if resolved != root and root not in resolved.parents:
-        raise PathNotAllowedError(f"Path {path!r} is outside the allowed directory {root}")
+    if not settings.is_path_allowed(resolved):
+        raise PathNotAllowedError(f"Path {path!r} is outside the allowed directories {settings.allowed_roots}")
 
     return resolved

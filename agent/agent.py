@@ -24,13 +24,19 @@ class Agent:
     what Gemini asks for and feeds results back.
     """
 
-    def __init__(self, settings: Settings, mcp_manager: MCPManager, memory_context: str = "") -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        mcp_manager: MCPManager,
+        memory_context: str = "",
+        project_context: str = "",
+    ) -> None:
         self._mcp = mcp_manager
         self._client = genai.Client(api_key=settings.gemini_api_key)
 
         tools = build_gemini_tools(mcp_manager.list_tools())
         config = genai_types.GenerateContentConfig(
-            system_instruction=build_system_prompt(memory_context),
+            system_instruction=build_system_prompt(memory_context, project_context),
             tools=tools or None,
         )
         self._chat = self._client.chats.create(model=settings.model, config=config)

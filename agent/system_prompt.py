@@ -49,11 +49,12 @@ risky, just ask him straight up.
 """
 
 
-def build_system_prompt(memory_context: str = "") -> str:
+def build_system_prompt(memory_context: str = "", project_context: str = "") -> str:
     """Build the system prompt with the current date/time and recalled memory injected.
 
     Called once per session (not per turn) — accurate enough for a chat
-    session's lifetime without adding staleness-tracking complexity.
+    session's lifetime without adding staleness-tracking complexity. Rebuilt
+    from scratch whenever the active project changes mid-session.
     """
     now = datetime.datetime.now().astimezone()
 
@@ -63,6 +64,9 @@ def build_system_prompt(memory_context: str = "") -> str:
         if memory_context
         else ""
     )
+
+    if project_context:
+        memory_section = f"{project_context}\n\n{memory_section}" if memory_section else project_context
 
     return _SYSTEM_PROMPT_TEMPLATE.format(
         current_datetime=now.strftime("%A, %B %d, %Y at %I:%M %p"),
