@@ -7,6 +7,9 @@ from pathlib import Path
 
 from rich.console import Console
 
+from adaptive.pipeline import run_import
+from adaptive.profile import AdaptiveProfile
+from adaptive.provider import AdaptiveProvider
 from agent.agent import Agent
 from agent.research_prompt import build_research_prompt
 from config.settings import Settings, get_settings
@@ -44,6 +47,10 @@ GitHub repo is auto-detected from git remote, never asked for
   switch project <name>   Same as 'use project'
   dashboard                Show the active project's dashboard
   plan                     Show today's plan for the active project
+  import chatgpt <path>    Import a ChatGPT export folder: extracts candidate \
+preferences/decisions/workflows/constraints for your approval (list_pending_candidates, \
+approve_candidate, reject_candidate). Never auto-learns anything; makes real \
+Gemini API calls and can take a few minutes for a large export.
 
 Projects are normally detected automatically: launch Mads from inside a \
 git/pyproject/package.json/etc. workspace and it activates (or offers to \
@@ -51,7 +58,9 @@ register) that project with no command needed.
 """
 
 
-def _build_providers(settings: Settings, planner: Planner, on_project_switch) -> list[ToolProvider]:
+def _build_providers(
+    settings: Settings, planner: Planner, adaptive_profile: AdaptiveProfile, on_project_switch
+) -> list[ToolProvider]:
     providers: list[ToolProvider] = [
         StdioToolProvider("filesystem", filesystem_server.build_server_params(settings)),
         StdioToolProvider("fetch", fetch_server.build_server_params(settings)),
@@ -74,6 +83,7 @@ def _build_providers(settings: Settings, planner: Planner, on_project_switch) ->
     providers.append(SystemProvider(settings))
     providers.append(ImageProvider(settings))
     providers.append(PlannerProvider(planner, settings, on_switch=on_project_switch))
+    providers.append(AdaptiveProvider(adaptive_profile, settings))
     return providers
 
 
@@ -92,6 +102,7 @@ _KNOWN_SERVER_NAMES = [
     "system",
     "image",
     "planner",
+    "adaptive",
 ]
 
 
@@ -118,7 +129,9 @@ class Session:
     agent: Agent
 
 
-async def _build_session(base_settings: Settings, planner: Planner, cwd: Path) -> Session:
+async def _build_session(
+    base_settings: Settings, planner: Planner, adaptive_profile: AdaptiveProfile, cwd: Path
+) -> Session:
     """(Re)build the live session around whatever Planner currently reports
     as the active project. Called once at startup and again on every
     project switch — a full MCP reconnect, since the filesystem server's
@@ -135,16 +148,18 @@ async def _build_session(base_settings: Settings, planner: Planner, cwd: Path) -
         # reconnect happens in the REPL loop once it sees the switch below.
         pass
 
-    providers = _build_providers(settings, planner, on_project_switch)
+    providers = _build_providers(settings, planner, adaptive_profile, on_project_switch)
     await mcp_manager.connect(providers)
 
     memory_context = build_recall_summary()
     project_context = planner.render_system_context()
+    adaptive_context = adaptive_profile.render_context()
     agent = Agent(
         settings=settings,
         mcp_manager=mcp_manager,
         memory_context=memory_context,
         project_context=project_context,
+        adaptive_context=adaptive_context,
     )
 
     return Session(settings=settings, mcp_manager=mcp_manager, agent=agent)
@@ -285,6 +300,38 @@ def _print_dashboard(planner: Planner) -> None:
     console.print()
 
 
+async def _run_chatgpt_import(settings: Settings, export_path_str: str) -> None:
+    """CLI-only by design (see adaptive.schemas) — a slow, real-cost bulk
+    pipeline stays under explicit manual control rather than something
+    Gemini can trigger mid-conversation. Nothing here writes to the
+    Adaptive Profile directly; everything lands in the pending queue for
+    review via list_pending_candidates/approve_candidate/reject_candidate.
+    """
+    export_dir = Path(export_path_str).expanduser().resolve()
+    if not export_dir.is_dir():
+        console.print(f"[red]Not a directory: {export_dir}[/red]")
+        return
+
+    console.print(f"\n[dim]Importing ChatGPT export from {export_dir}…[/dim]")
+    console.print("[dim]This reads exported conversations and makes batched Gemini calls to classify/extract/score candidates — can take a few minutes for a large export.[/dim]\n")
+
+    with console.status("[dim]running import pipeline…[/dim]", spinner="dots"):
+        stats = await run_import(settings, export_dir)
+
+    console.print(f"[green]✓[/green] Import complete")
+    console.print(f"  Conversations in export: {stats.total_in_export}")
+    console.print(f"  Already processed (skipped): {stats.already_processed}")
+    console.print(f"  Gated out (too short/trivial): {stats.gated_out}")
+    console.print(f"  Classified: {stats.classified}")
+    console.print(f"  Worth learning: {stats.worth_learning}")
+    console.print(f"  Candidates extracted: {stats.candidates_extracted}")
+    console.print(f"  Candidates after dedup/scoring: {stats.candidates_scored}")
+    console.print(f"  New items in approval queue: {len(stats.enqueued)}")
+
+    if stats.enqueued:
+        console.print("\n[bold]Review with the 'adaptive' tools in chat[/bold] — ask Mads to \"show pending candidates\" \nto approve/reject, nothing is learned automatically.\n")
+
+
 def _print_plan(planner: Planner) -> None:
     plan = planner.daily_plan()
     if plan.project_name is None:
@@ -306,8 +353,9 @@ async def _run_repl() -> None:
     _configure_logging(base_settings.log_level)
 
     planner = Planner()
+    adaptive_profile = AdaptiveProfile()
     _resolve_startup_project(planner)
-    session = await _build_session(base_settings, planner, Path.cwd())
+    session = await _build_session(base_settings, planner, adaptive_profile, Path.cwd())
 
     try:
         _print_banner(session, planner)
@@ -355,9 +403,22 @@ async def _run_repl() -> None:
                     continue
 
                 await session.mcp_manager.aclose()
-                session = await _build_session(base_settings, planner, Path.cwd())
+                session = await _build_session(base_settings, planner, adaptive_profile, Path.cwd())
                 active = planner.projects.get_active()
                 console.print(f"[green]✓[/green] Active Project: [bold]{active.name}[/bold]\n")
+                continue
+
+            if command.startswith("import chatgpt "):
+                export_path_str = user_input.split(" ", 2)[2].strip()
+                if not export_path_str:
+                    console.print("[red]Usage: import chatgpt <path-to-export-folder>[/red]")
+                    continue
+                await _run_chatgpt_import(session.settings, export_path_str)
+                # Approved facts only reach the system prompt on the next
+                # session build (restart, or a project switch which already
+                # rebuilds it) — Gemini's chat session holds a fixed
+                # system_instruction set at construction time, so approvals
+                # made later this session take effect next time, not live.
                 continue
 
             if command.startswith("research "):

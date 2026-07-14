@@ -62,9 +62,15 @@ class MemoryProvider:
             return {"deleted": deleted}
 
         if name == "update_memory":
-            memory = store.update_memory(
-                arguments["memory_id"], arguments.get("content"), arguments.get("tags")
-            )
+            try:
+                memory = store.update_memory(
+                    arguments["memory_id"],
+                    arguments.get("content"),
+                    arguments.get("tags"),
+                    arguments.get("category"),
+                )
+            except store.InvalidCategoryError as exc:
+                return {"error": str(exc)}
             if memory is None:
                 return {"error": f"No memory found with id {arguments['memory_id']}"}
             return asdict(memory)
@@ -73,7 +79,7 @@ class MemoryProvider:
             results = _search_memory(
                 arguments["query"], arguments.get("category"), arguments.get("limit", 10)
             )
-            return [{"score": r.score, **asdict(r.memory)} for r in results]
+            return [{"score": r.score, "source": r.source, **asdict(r.memory)} for r in results]
 
         if name == "list_memories":
             memories = store.list_all(arguments.get("category"))

@@ -49,7 +49,9 @@ risky, just ask him straight up.
 """
 
 
-def build_system_prompt(memory_context: str = "", project_context: str = "") -> str:
+def build_system_prompt(
+    memory_context: str = "", project_context: str = "", adaptive_context: str = ""
+) -> str:
     """Build the system prompt with the current date/time and recalled memory injected.
 
     Called once per session (not per turn) — accurate enough for a chat
@@ -67,6 +69,9 @@ def build_system_prompt(memory_context: str = "", project_context: str = "") -> 
 
     if project_context:
         memory_section = f"{project_context}\n\n{memory_section}" if memory_section else project_context
+
+    if adaptive_context:
+        memory_section = f"{adaptive_context}\n\n{memory_section}" if memory_section else adaptive_context
 
     return _SYSTEM_PROMPT_TEMPLATE.format(
         current_datetime=now.strftime("%A, %B %d, %Y at %I:%M %p"),
