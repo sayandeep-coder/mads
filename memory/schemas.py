@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from mcp import Tool
 
-_CATEGORY_ENUM = ["preference", "project", "decision", "person"]
+_CATEGORY_ENUM = ["preference", "project", "decision", "person", "identity"]
 _CATEGORY_DESC = (
     "The kind of memory: 'preference' (things Sayan likes/dislikes/prefers), "
     "'project' (what he's working on and its state), 'decision' (a choice made and why), "
-    "or 'person' (facts about someone he works with or knows)."
+    "'person' (facts about someone he works with or knows), or 'identity' (stable facts about "
+    "Sayan himself — name, roll number, college, devices he owns, contact info, and similar)."
 )
 
 MEMORY_TOOLS = [
@@ -44,7 +45,7 @@ MEMORY_TOOLS = [
     ),
     Tool(
         name="update_memory",
-        description="Update the content and/or tags of an existing memory (e.g. a project's status changed).",
+        description="Update the content, tags, and/or category of an existing memory (e.g. a project's status changed, or it was filed under the wrong category).",
         inputSchema={
             "type": "object",
             "properties": {
@@ -55,6 +56,7 @@ MEMORY_TOOLS = [
                     "items": {"type": "string"},
                     "description": "New tags, replacing the old set. Omit to leave unchanged.",
                 },
+                "category": {"type": "string", "enum": _CATEGORY_ENUM, "description": "New category, replacing the old. Omit to leave unchanged."},
             },
             "required": ["memory_id"],
         },
@@ -62,14 +64,24 @@ MEMORY_TOOLS = [
     Tool(
         name="search_memory",
         description=(
-            "Search stored memories about Sayan by relevance to a query. Use this before assuming "
-            "you don't know something about his preferences, projects, decisions, or people he knows."
+            "Search everything Mads knows about Sayan by relevance to a query — covers both memory "
+            "told directly in conversation AND the Adaptive Profile learned from imported history "
+            "(identity/contact info, preferences, decisions, workflows, constraints). Always search "
+            "here before asking Sayan to repeat a personal detail, contact info, or preference he may "
+            "have already given — including in ChatGPT history he imported."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "What to search for."},
-                "category": {"type": "string", "enum": _CATEGORY_ENUM, "description": "Optionally restrict the search to one category."},
+                "category": {
+                    "type": "string",
+                    "description": (
+                        "Optionally restrict the search to one category. Memory categories: "
+                        "preference, project, decision, person. Adaptive Profile categories: "
+                        "identity, preference, decision, workflow, constraint. Omit to search all."
+                    ),
+                },
                 "limit": {"type": "integer", "description": "Maximum number of results.", "default": 10},
             },
             "required": ["query"],

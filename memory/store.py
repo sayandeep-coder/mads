@@ -7,7 +7,7 @@ from pathlib import Path
 
 _DB_PATH = Path.home() / ".mads" / "memory.sqlite3"
 
-_VALID_CATEGORIES = {"preference", "project", "decision", "person"}
+_VALID_CATEGORIES = {"preference", "project", "decision", "person", "identity"}
 
 
 class InvalidCategoryError(ValueError):
@@ -94,8 +94,16 @@ def forget(memory_id: int) -> bool:
         return cursor.rowcount > 0
 
 
-def update_memory(memory_id: int, content: str | None = None, tags: list[str] | None = None) -> Memory | None:
-    """Update an existing memory's content and/or tags. Returns the updated memory, or None if not found."""
+def update_memory(
+    memory_id: int,
+    content: str | None = None,
+    tags: list[str] | None = None,
+    category: str | None = None,
+) -> Memory | None:
+    """Update an existing memory's content, tags, and/or category. Returns the updated memory, or None if not found."""
+    if category is not None:
+        _validate_category(category)
+
     with _connect() as conn:
         row = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
         if row is None:
@@ -103,11 +111,12 @@ def update_memory(memory_id: int, content: str | None = None, tags: list[str] | 
 
         new_content = content if content is not None else row["content"]
         new_tags = ",".join(tags) if tags is not None else row["tags"]
+        new_category = category if category is not None else row["category"]
         now = datetime.now(timezone.utc).isoformat()
 
         conn.execute(
-            "UPDATE memories SET content = ?, tags = ?, updated_at = ? WHERE id = ?",
-            (new_content, new_tags, now, memory_id),
+            "UPDATE memories SET content = ?, tags = ?, category = ?, updated_at = ? WHERE id = ?",
+            (new_content, new_tags, new_category, now, memory_id),
         )
         updated_row = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
 
