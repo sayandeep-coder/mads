@@ -12,7 +12,7 @@ from mcp import Tool
 from auth.google_oauth import get_credentials
 from config.settings import Settings
 from mcp_servers.manager import ToolCallResult
-from mcp_servers.servers.google_workspace import _calendar, _docs, _drive, _gmail, _sheets
+from mcp_servers.servers.google_workspace import _calendar, _docs, _drive, _forms, _gmail, _sheets
 from mcp_servers.servers.google_workspace._schemas import ALL_TOOLS
 
 logger = logging.getLogger(__name__)
@@ -23,11 +23,12 @@ ALL_SCOPES = (
     + _drive.DRIVE_SCOPES
     + _docs.DOCS_SCOPES
     + _sheets.SHEETS_SCOPES
+    + _forms.FORMS_SCOPES
 )
 
 
 class GoogleWorkspaceProvider:
-    """Single unified tool provider for Google Workspace: Gmail, Calendar, Drive, Docs, Sheets.
+    """Single unified tool provider for Google Workspace: Gmail, Calendar, Drive, Docs, Sheets, Forms.
 
     Backed by direct Google REST APIs (via google-api-python-client) rather
     than Google's official per-app MCP servers, since those don't cover
@@ -63,6 +64,7 @@ class GoogleWorkspaceProvider:
             "drive": build("drive", "v3", credentials=credentials),
             "docs": build("docs", "v1", credentials=credentials),
             "sheets": build("sheets", "v4", credentials=credentials),
+            "forms": build("forms", "v1", credentials=credentials),
         }
 
     def list_tools(self) -> list[Tool]:
@@ -105,6 +107,8 @@ class GoogleWorkspaceProvider:
             "append_sheet": (self._services["sheets"], _sheets.append_sheet),
             "update_sheet": (self._services["sheets"], _sheets.update_sheet),
             "create_sheet": (self._services["sheets"], _sheets.create_sheet),
+            "create_form": (self._services["forms"], _forms.create_form),
+            "get_form_responses": (self._services["forms"], _forms.get_form_responses),
         }
 
         entry = dispatch_table.get(name)

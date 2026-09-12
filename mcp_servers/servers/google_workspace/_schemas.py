@@ -287,4 +287,160 @@ SHEETS_TOOLS = [
     ),
 ]
 
-ALL_TOOLS = GMAIL_TOOLS + CALENDAR_TOOLS + DRIVE_TOOLS + DOCS_TOOLS + SHEETS_TOOLS
+_QUESTION_SCHEMA = {
+    "type": "object",
+    "description": "One form question or structural element.",
+    "properties": {
+        "kind": {
+            "type": "string",
+            "enum": [
+                "short_text",
+                "paragraph_text",
+                "multiple_choice",
+                "checkboxes",
+                "dropdown",
+                "linear_scale",
+                "date",
+                "time",
+                "file_upload",
+                "grid",
+                "section_break",
+            ],
+            "description": (
+                "The question type. short_text/paragraph_text: free text (one line vs multi-line). "
+                "multiple_choice: pick one (radio buttons). checkboxes: pick any number. "
+                "dropdown: pick one from a dropdown menu. linear_scale: numeric scale (e.g. 1-5 rating). "
+                "date/time: date or time picker. file_upload: respondent uploads a file. "
+                "grid: a matrix of rows x columns (e.g. rate several items on the same scale). "
+                "section_break: a page break / section title, not a question — use to split a long "
+                "form into pages."
+            ),
+        },
+        "title": {
+            "type": "string",
+            "description": (
+                "The question text (or section title for section_break). For short_text fields that "
+                "need a specific format (email, phone number, URL), say so directly in the title or "
+                "description, e.g. 'Email address' with description 'Must be a valid email address' — "
+                "Google Forms' API does not expose settable format validation (email/phone/URL/regex), "
+                "so this is the only way to signal the expectation to respondents; a human can add real "
+                "validation afterward in the Forms editor UI (Google Forms > question > ⋮ > Response "
+                "validation) in a few seconds per field."
+            ),
+        },
+        "description": {"type": "string", "description": "Optional helper text shown below the title."},
+        "required": {"type": "boolean", "description": "Whether an answer is mandatory. Default false.", "default": False},
+        "section_id": {
+            "type": "string",
+            "description": (
+                "For section_break only: a short label you choose (e.g. 'flutter', 'backend') so "
+                "other questions' options_goto can target this section by name. Only needed on "
+                "sections that are branching destinations."
+            ),
+        },
+        "options": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "For multiple_choice/checkboxes/dropdown: the list of choices.",
+        },
+        "options_goto": {
+            "type": "array",
+            "description": (
+                "For multiple_choice/dropdown ONLY (Google Forms does not support branching on "
+                "checkboxes, since multiple can be selected at once — there's no single answer to "
+                "branch on). Each entry routes one option to a destination when the respondent picks "
+                "it. Options not listed here fall through to the next section as normal."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "option": {"type": "string", "description": "The option's exact text, from `options`."},
+                    "goto": {
+                        "type": "string",
+                        "description": (
+                            "Where this option sends the respondent: a section_id defined on some "
+                            "section_break's `section_id` field, or one of '@next' (continue to the "
+                            "very next section — the default behavior, only specify to be explicit), "
+                            "'@submit' (submit the form immediately), or '@restart' (return to the "
+                            "start of the form)."
+                        ),
+                    },
+                },
+                "required": ["option", "goto"],
+            },
+        },
+        "shuffle": {"type": "boolean", "description": "For multiple_choice/checkboxes/dropdown: randomize option order per respondent."},
+        "scale_low": {"type": "integer", "description": "For linear_scale: lowest value (usually 0 or 1)."},
+        "scale_high": {"type": "integer", "description": "For linear_scale: highest value (up to 10)."},
+        "scale_low_label": {"type": "string", "description": "For linear_scale: label for the low end, e.g. 'Not likely'."},
+        "scale_high_label": {"type": "string", "description": "For linear_scale: label for the high end, e.g. 'Very likely'."},
+        "include_time": {"type": "boolean", "description": "For date: also ask for a time, not just a date."},
+        "is_duration": {"type": "boolean", "description": "For time: ask for a duration instead of a time of day."},
+        "max_files": {"type": "integer", "description": "For file_upload: max number of files the respondent may attach."},
+        "max_file_size_bytes": {"type": "integer", "description": "For file_upload: max size per file in bytes."},
+        "grid_rows": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "For grid: the row labels (e.g. the items being rated).",
+        },
+        "grid_columns": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "For grid: the column labels (e.g. the rating scale).",
+        },
+        "grid_multiple_selection": {
+            "type": "boolean",
+            "description": "For grid: allow multiple column selections per row (checkbox grid) instead of one (radio grid).",
+        },
+    },
+    "required": ["kind", "title"],
+}
+
+FORMS_TOOLS = [
+    Tool(
+        name="create_form",
+        description=(
+            "Create a new Google Form with a title and a full list of questions, in one call. "
+            "Supports every common question type: short/long text, multiple choice, checkboxes, "
+            "dropdown, linear scale (rating), date, time, file upload, grids (matrix questions), "
+            "and section breaks for multi-page forms. Build the entire question list up front rather "
+            "than creating an empty form and adding questions one at a time.\n\n"
+            "Conditional branching (e.g. 'if the applicant picks Flutter, only show Flutter "
+            "questions') is supported via a multiple_choice or dropdown question's `options_goto` "
+            "field routing to a section_break's `section_id` — see those fields' descriptions for the "
+            "exact shape. Branching only works on multiple_choice/dropdown (a Google Forms API "
+            "constraint), never checkboxes.\n\n"
+            "Field-format validation (must be a valid email/phone/URL) is NOT settable through this "
+            "API at all — that's a real Google Forms API limitation, not a gap in this tool. Say the "
+            "expected format in the question title/description instead, and mention to the user that "
+            "real validation can be added afterward in the Forms editor UI in a few seconds per field."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Form title."},
+                "description": {"type": "string", "description": "Form description, shown at the top."},
+                "questions": {
+                    "type": "array",
+                    "items": _QUESTION_SCHEMA,
+                    "description": "The form's questions and section breaks, in display order.",
+                },
+            },
+            "required": ["title"],
+        },
+    ),
+    Tool(
+        name="get_form_responses",
+        description="Read submitted responses to a form as structured question-to-answer data, most recent first.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "form_id": {"type": "string", "description": "The form id, as returned by create_form."},
+                "max_results": {"type": "integer", "description": "Maximum number of responses to return.", "default": 50},
+            },
+            "required": ["form_id"],
+        },
+    ),
+]
+
+ALL_TOOLS = GMAIL_TOOLS + CALENDAR_TOOLS + DRIVE_TOOLS + DOCS_TOOLS + SHEETS_TOOLS + FORMS_TOOLS
