@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+    <title>Mads</title>
+    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+    <link rel="stylesheet" href="taskpane.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="dot" id="status-dot"></span>
+      </div>
+      <div class="topbar-actions">
+        <button id="settings-toggle" type="button" class="icon-btn" aria-label="Server settings">
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="none">
+            <circle cx="8" cy="3.2" r="1.15" fill="currentColor" />
+            <circle cx="8" cy="8" r="1.15" fill="currentColor" />
+            <circle cx="8" cy="12.8" r="1.15" fill="currentColor" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="settings" id="settings-panel" hidden>
+      <input id="server-url" type="text" placeholder="http://127.0.0.1:8000" />
+      <button id="connect-btn" type="button">Connect</button>
+    </div>
+
+    <main id="messages" class="messages">
+      <div class="empty-state" id="empty-state">
+        <div class="glow-wrap" aria-hidden="true">
+          <img class="glow-logo" src="assets/icon-80.png" alt="" />
+        </div>
+        <div class="empty-title">Ready when you are</div>
+
+        <div class="suggested-prompts">
+          <button type="button" class="prompt-pill" data-prompt="What sheets are in this workbook?">
+            What sheets are in this workbook?
+          </button>
+          <button type="button" class="prompt-pill" data-prompt="Summarize what's in my current selection">
+            Summarize what's in my current selection
+          </button>
+          <button type="button" class="prompt-pill" data-prompt="Read Sheet1 and tell me what you see">
+            Read Sheet1 and tell me what you see
+          </button>
+        </div>
+      </div>
+    </main>
+
+    <footer class="composer">
+      <div class="composer-inner">
+        <textarea id="input" rows="1" placeholder="Ask Mads about this workbook…"></textarea>
+        <div class="composer-row">
+          <span class="composer-spacer"></span>
+          <button id="send-btn" type="button" aria-label="Send">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+              <path
+                d="M8 13V3M8 3L3.5 7.5M8 3l4.5 4.5"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </div>
+      </div>
+    </footer>
+
+    <script src="taskpane.js"></script>
+  </body>
+</html>

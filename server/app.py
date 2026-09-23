@@ -6,16 +6,17 @@ import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from adaptive.profile import AdaptiveProfile
-from agent.session import Session, build_session, resolve_startup_project
+from agent.session import Session, build_browser_session, build_excel_session, build_session, resolve_startup_project
 from config.settings import get_settings
 from planner.planner import Planner
+from server.browser_bridge import browser_bridge, excel_bridge
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +46,15 @@ async def lifespan(app: FastAPI):
     resolve_startup_project(planner, Path.cwd(), auto_register=True)
 
     session = await build_session(base_settings, planner, adaptive_profile, Path.cwd())
+    browser_session = await build_browser_session(base_settings, browser_bridge)
+    excel_session = await build_excel_session(base_settings, excel_bridge)
 
     _state["base_settings"] = base_settings
     _state["planner"] = planner
     _state["adaptive_profile"] = adaptive_profile
     _state["session"] = session
+    _state["browser_session"] = browser_session
+    _state["excel_session"] = excel_session
 
     logger.info("Mads web server ready — connected: %s", session.mcp_manager.connected_servers)
 
@@ -57,6 +62,10 @@ async def lifespan(app: FastAPI):
 
     session = _state["session"]
     await session.mcp_manager.aclose()
+    browser_session: Session = _state["browser_session"]  # type: ignore[assignment]
+    await browser_session.mcp_manager.aclose()
+    excel_session: Session = _state["excel_session"]  # type: ignore[assignment]
+    await excel_session.mcp_manager.aclose()
 
 
 app = FastAPI(title="Mads", lifespan=lifespan)
@@ -121,6 +130,84 @@ async def chat(request: ChatRequest):
         planner.record_action(request.message[:120])
 
     return EventSourceResponse(event_generator())
+
+
+@app.websocket("/ws/browser")
+async def browser_socket(websocket: WebSocket):
+    """The Mads Chrome extension's side panel holds this connection open for
+    its whole lifetime. Every browser_control tool call (see
+    mcp_servers/servers/browser_control) sends a command down this same
+    socket and awaits the matching reply — see server.browser_bridge for the
+    request/response matching.
+    """
+    await browser_bridge.handle_connection(websocket)
+
+
+@app.get("/api/browser/status")
+async def browser_status():
+    return {"connected": browser_bridge.is_connected}
+
+
+@app.post("/api/browser/chat")
+async def browser_chat(request: ChatRequest):
+    """Same streaming contract as /api/chat, but driven by the browser
+    session (browser_control + memory only) instead of the full CLI/web
+    chat session — see agent.session.build_browser_session.
+    """
+    browser_session: Session = _state["browser_session"]  # type: ignore[assignment]
+
+    async def event_generator():
+        async for event in browser_session.agent.stream(request.message):
+            yield {"event": "message", "data": json.dumps(_event_to_sse_dict(event))}
+
+    return EventSourceResponse(event_generator())
+
+
+@app.post("/api/browser/chat/reset")
+async def browser_chat_reset():
+    """Start a fresh browser-agent conversation (e.g. when the side panel reopens)."""
+    browser_session: Session = _state["browser_session"]  # type: ignore[assignment]
+    browser_session.agent.reset()
+    return {"ok": True}
+
+
+@app.websocket("/ws/excel")
+async def excel_socket(websocket: WebSocket):
+    """The Mads Excel task pane holds this connection open for its whole
+    lifetime. Every excel_control tool call (see
+    mcp_servers/servers/excel_control) sends a command down this same
+    socket and awaits the matching reply — see server.browser_bridge for
+    the request/response matching (excel_bridge is a separate instance of
+    the same WebSocketCommandBridge the Chrome extension uses).
+    """
+    await excel_bridge.handle_connection(websocket)
+
+
+@app.get("/api/excel/status")
+async def excel_status():
+    return {"connected": excel_bridge.is_connected}
+
+
+@app.post("/api/excel/chat")
+async def excel_chat(request: ChatRequest):
+    """Same streaming contract as /api/chat, but driven by the Excel
+    session (excel_control + memory only) — see agent.session.build_excel_session.
+    """
+    excel_session: Session = _state["excel_session"]  # type: ignore[assignment]
+
+    async def event_generator():
+        async for event in excel_session.agent.stream(request.message):
+            yield {"event": "message", "data": json.dumps(_event_to_sse_dict(event))}
+
+    return EventSourceResponse(event_generator())
+
+
+@app.post("/api/excel/chat/reset")
+async def excel_chat_reset():
+    """Start a fresh Excel-agent conversation (e.g. when the task pane reopens)."""
+    excel_session: Session = _state["excel_session"]  # type: ignore[assignment]
+    excel_session.agent.reset()
+    return {"ok": True}
 
 
 @app.post("/api/chat/reset")

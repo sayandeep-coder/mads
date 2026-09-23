@@ -1,0 +1,15 @@
+{
+  "name": "mads-excel-addin",
+  "version": "1.0.0",
+  "description": "Mads task pane for Microsoft Excel — chat with your open workbook.",
+  "private": true,
+  "scripts": {
+    "start": "office-addin-dev-certs install && node server.js",
+    "cert": "office-addin-dev-certs install",
+    "sideload": "office-addin-debugging start manifest.xml"
+  },
+  "devDependencies": {
+    "office-addin-debugging": "^7.0.0",
+    "office-addin-dev-certs": "^3.0.0"
+  }
+}

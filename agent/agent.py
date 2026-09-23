@@ -49,7 +49,7 @@ class AgentEvent:
     each kind differently; Agent itself doesn't know or care who's listening.
     """
 
-    type: Literal["tool_call_started", "tool_call_finished", "final_response"]
+    type: Literal["tool_call_started", "tool_call_finished", "text_delta", "final_response"]
     tool_name: str | None = None
     tool_args: dict[str, Any] | None = None
     is_error: bool | None = None
@@ -75,13 +75,21 @@ class Agent:
         memory_context: str = "",
         project_context: str = "",
         adaptive_context: str = "",
+        browser_mode: bool = False,
+        excel_mode: bool = False,
     ) -> None:
         self._mcp = mcp_manager
         self._client = genai.Client(api_key=settings.gemini_api_key)
 
         tools = build_gemini_tools(mcp_manager.list_tools())
         config = genai_types.GenerateContentConfig(
-            system_instruction=build_system_prompt(memory_context, project_context, adaptive_context),
+            system_instruction=build_system_prompt(
+                memory_context,
+                project_context,
+                adaptive_context,
+                browser_mode=browser_mode,
+                excel_mode=excel_mode,
+            ),
             tools=tools or None,
         )
         self._model = settings.model
@@ -106,16 +114,31 @@ class Agent:
 
     async def stream(self, message: str) -> AsyncIterator[AgentEvent]:
         """Send a user message, yielding an AgentEvent for every tool call
-        as it starts and finishes, and finally the reply text.
+        as it starts and finishes, text_delta as the reply is generated,
+        and finally the complete reply text.
 
-        Same round-loop and concurrent-tool-call behavior as before — this
-        is the single implementation now; send() just drains it and keeps
-        the last final_response.
+        Each round uses send_message_stream rather than send_message so
+        text actually arrives incrementally instead of all at once at the
+        end — a round that asks for tool calls streams no text (Gemini
+        emits those as a single chunk with no .text, confirmed against the
+        live API), so text_delta only ever fires on the round that produces
+        the final reply.
         """
-        response = self._chat.send_message(message)
+        full_text = ""
+        next_message: Any = message
 
         for _ in range(_MAX_TOOL_CALL_ROUNDS):
-            function_calls = response.function_calls
+            function_calls: list[genai_types.FunctionCall] = []
+            round_text = ""
+
+            async for chunk in self._stream_chunks(next_message):
+                if chunk.text:
+                    round_text += chunk.text
+                    full_text += chunk.text
+                    yield AgentEvent(type="text_delta", text=chunk.text)
+                if chunk.function_calls:
+                    function_calls = chunk.function_calls
+
             if not function_calls:
                 break
 
@@ -149,9 +172,40 @@ class Agent:
                 response_parts.append(part)
             await asyncio.gather(*tasks)
 
-            response = self._chat.send_message(response_parts)
+            next_message = response_parts
 
-        yield AgentEvent(type="final_response", text=response.text or "")
+        yield AgentEvent(type="final_response", text=full_text)
+
+    async def _stream_chunks(self, message: Any) -> AsyncIterator[genai_types.GenerateContentResponse]:
+        """Bridge the SDK's sync streaming iterator (send_message_stream
+        blocks on network I/O per chunk) onto the async world by running it
+        in a thread and forwarding each chunk through a queue — so a slow
+        model response doesn't stall the event loop other requests share.
+        """
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        _SENTINEL = object()
+
+        def _produce() -> None:
+            try:
+                for chunk in self._chat.send_message_stream(message):
+                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
+            except Exception as exc:  # noqa: BLE001 — forward the failure into the async side
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
+
+        thread = asyncio.get_running_loop().run_in_executor(None, _produce)
+        try:
+            while True:
+                item = await queue.get()
+                if item is _SENTINEL:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            await thread
 
     async def _execute_function_call(
         self, call: genai_types.FunctionCall

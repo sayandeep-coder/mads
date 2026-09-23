@@ -16,7 +16,9 @@ from mcp_servers.servers import maps as maps_server
 from mcp_servers.servers import search as search_server
 from mcp_servers.servers import spotify as spotify_server
 from mcp_servers.servers import youtube as youtube_server
+from mcp_servers.servers.browser_control import BrowserControlProvider
 from mcp_servers.servers.document_intelligence import DocumentIntelligenceProvider
+from mcp_servers.servers.excel_control import ExcelControlProvider
 from mcp_servers.servers.google_workspace import GoogleWorkspaceProvider
 from mcp_servers.servers.image import ImageProvider
 from mcp_servers.servers.system import SystemProvider
@@ -46,6 +48,8 @@ KNOWN_SERVER_NAMES = [
     "image",
     "planner",
     "adaptive",
+    "browser_control",
+    "excel_control",
 ]
 
 
@@ -72,6 +76,11 @@ def build_providers(
     from mcp_servers.servers.astrology import AstrologyProvider
     if AstrologyProvider.is_available(settings):
         providers.append(AstrologyProvider(settings))
+        
+    from mcp_servers.servers.pdf_annotator import PdfAnnotatorProvider
+    if PdfAnnotatorProvider.is_available(settings):
+        providers.append(PdfAnnotatorProvider(settings))
+        
     providers.append(DocumentIntelligenceProvider(settings))
     providers.append(MemoryProvider(settings))
     providers.append(SystemProvider(settings))
@@ -132,6 +141,73 @@ async def build_session(
     )
 
     return Session(settings=settings, mcp_manager=mcp_manager, agent=agent)
+
+
+async def build_browser_session(base_settings: Settings, bridge) -> Session:
+    """Build a separate, lightweight session for the Chrome side panel: just
+    browser_control (backed by `bridge`, the live extension websocket) plus
+    memory, so the browser agent knows who Sayan is without also spinning up
+    every stdio MCP subprocess (filesystem, github, ...) that a normal chat
+    session needs but a "go to flipkart and search shoes" request never
+    touches.
+
+    google_workspace is the one exception, added when OAuth is configured:
+    Google Sheets/Docs render their content on a <canvas>, not real DOM, so
+    browser_control's click/type tools cannot edit them no matter how good
+    the DOM heuristics get (see content.js's isCanvasGridApp) — the only
+    correct way to edit a sheet the user is looking at is the real Sheets
+    API (read_sheet/update_sheet), which is exactly what google_workspace
+    already provides.
+
+    Deliberately not routed through build_providers/build_session — those
+    assume the CLI/web chat's full tool fleet and a Planner-tracked active
+    project, neither of which the browser agent needs or should block on.
+    """
+    mcp_manager = MCPManager()
+    providers: list[ToolProvider] = [
+        BrowserControlProvider(bridge),
+        MemoryProvider(base_settings),
+    ]
+    if GoogleWorkspaceProvider.is_available(base_settings):
+        providers.append(GoogleWorkspaceProvider(base_settings))
+    await mcp_manager.connect(providers)
+
+    memory_context = build_recall_summary()
+    agent = Agent(
+        settings=base_settings,
+        mcp_manager=mcp_manager,
+        memory_context=memory_context,
+        browser_mode=True,
+    )
+
+    return Session(settings=base_settings, mcp_manager=mcp_manager, agent=agent)
+
+
+async def build_excel_session(base_settings: Settings, bridge) -> Session:
+    """Build a separate, lightweight session for the Excel task pane: just
+    excel_control (backed by `bridge`, the live Office add-in websocket)
+    plus memory — same shape as build_browser_session, but for Excel
+    instead of Chrome. Unlike the browser case, Excel's own JS API
+    (Office.js's Excel.run()) has direct, structured access to the open
+    workbook, so there's no DOM-heuristics layer here at all — read_range/
+    write_range operate on real cell addresses, not guessed element ids.
+    """
+    mcp_manager = MCPManager()
+    providers: list[ToolProvider] = [
+        ExcelControlProvider(bridge),
+        MemoryProvider(base_settings),
+    ]
+    await mcp_manager.connect(providers)
+
+    memory_context = build_recall_summary()
+    agent = Agent(
+        settings=base_settings,
+        mcp_manager=mcp_manager,
+        memory_context=memory_context,
+        excel_mode=True,
+    )
+
+    return Session(settings=base_settings, mcp_manager=mcp_manager, agent=agent)
 
 
 def resolve_startup_project(planner: Planner, cwd: Path, *, auto_register: bool = False) -> None:

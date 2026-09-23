@@ -1,0 +1,96 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Mads</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="dot" id="status-dot"></span>
+      </div>
+      <div class="topbar-actions">
+        <button id="settings-toggle" type="button" class="icon-btn" aria-label="Server settings">
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="none">
+            <circle cx="8" cy="3.2" r="1.15" fill="currentColor" />
+            <circle cx="8" cy="8" r="1.15" fill="currentColor" />
+            <circle cx="8" cy="12.8" r="1.15" fill="currentColor" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="settings" id="settings-panel" hidden>
+      <input id="server-url" type="text" placeholder="http://127.0.0.1:8000" />
+      <button id="connect-btn" type="button">Connect</button>
+    </div>
+
+    <main id="messages" class="messages">
+      <div class="empty-state" id="empty-state">
+        <div class="glow-wrap" aria-hidden="true">
+          <img class="glow-logo" src="icons/icon128.png" alt="" />
+        </div>
+        <div class="empty-title">Ready when you are</div>
+
+        <div class="suggested-prompts">
+          <button type="button" class="prompt-pill" data-prompt="Summarize this page for me">
+            Summarize this page for me
+          </button>
+          <button type="button" class="prompt-pill" data-prompt="Find the best deal on this page">
+            Find the best deal on this page
+          </button>
+          <button type="button" class="prompt-pill" data-prompt="Go to a site and search for something">
+            Go to a site and search for something
+          </button>
+        </div>
+      </div>
+    </main>
+
+    <div class="tab-chip" id="tab-chip" hidden>
+      <img class="tab-chip-icon" src="icons/icon16.png" alt="" />
+      <span class="tab-chip-label" id="tab-chip-label"></span>
+      <button type="button" class="tab-chip-close" id="tab-chip-close" aria-label="Hide current tab">
+        <svg viewBox="0 0 16 16" width="12" height="12" fill="none">
+          <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+      </button>
+    </div>
+
+    <footer class="composer">
+      <div class="composer-inner">
+        <textarea id="input" rows="1" placeholder="Type / to use skills"></textarea>
+        <div class="composer-row">
+          <button type="button" class="icon-btn composer-add" aria-label="Add">
+            <svg viewBox="0 0 16 16" width="16" height="16" fill="none">
+              <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+            </svg>
+          </button>
+
+          <div class="composer-spacer"></div>
+
+          <button type="button" class="mode-pill" id="mode-pill">
+            <span>Auto</span>
+            <svg viewBox="0 0 16 16" width="11" height="11" fill="none">
+              <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+
+          <button id="send-btn" type="button" aria-label="Send">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+              <path
+                d="M8 13V3M8 3L3.5 7.5M8 3l4.5 4.5"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </div>
+      </div>
+    </footer>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

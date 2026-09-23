@@ -11,6 +11,7 @@ const API_BASE =
 const KIND_LABEL: Record<GeneratedFile["kind"], string> = {
   pdf: "PDF",
   pptx: "Slides",
+  xlsx: "Spreadsheet",
   image: "Image",
   file: "File",
 };
