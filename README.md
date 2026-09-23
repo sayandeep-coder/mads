@@ -55,7 +55,7 @@ flowchart TB
     Stdio --> C7["Context7 MCP<br/>(@upstash/context7-mcp)"]
     Stdio --> GH["GitHub MCP<br/>(github-mcp-server, Go binary)"]
 
-    Local --> GW["Google Workspace<br/>Gmail · Calendar · Drive · Docs · Sheets"]
+    Local --> GW["Google Workspace<br/>Gmail · Calendar · Drive · Docs · Sheets · Forms"]
     Local --> YT["YouTube<br/>Data API v3"]
     Local --> SP["Spotify<br/>Web API"]
     Local --> SR["Search<br/>SerpApi"]
@@ -261,7 +261,7 @@ several `approve_candidate` calls at once) can no longer corrupt these files.
 | **Fetch** | Official `mcp-server-fetch` (uvx, stdio MCP) | — |
 | **Context7** | Official `@upstash/context7-mcp` (npx, stdio MCP) | — |
 | **GitHub** | Official `github-mcp-server` Go binary, read-only mode (stdio MCP) | — |
-| **Google Workspace** | Direct Gmail/Calendar/Drive/Docs/Sheets REST APIs (OAuth) — official per-app MCP servers exist but can't send/write or cover Docs/Sheets, so this calls the APIs directly | 20 |
+| **Google Workspace** | Direct Gmail/Calendar/Drive/Docs/Sheets/Forms REST APIs (OAuth) — official per-app MCP servers exist but can't send/write or cover Docs/Sheets/Forms, so this calls the APIs directly | 22 |
 | **YouTube** | Direct YouTube Data API v3 (API key) — the community MCP server for this is broken against current SDK versions | 4 |
 | **Spotify** | Direct Spotify Web API (OAuth) | 2 |
 | **Search** | SerpApi (API key) | 1 |

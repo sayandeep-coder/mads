@@ -33,6 +33,7 @@ class Settings:
     spotify_redirect_uri: str | None
     serpapi_api_key: str | None
     google_maps_api_key: str | None
+    astrology_api_key: str | None
 
     filesystem_root: Path
 
@@ -99,6 +100,7 @@ def get_settings() -> Settings:
         spotify_redirect_uri=_optional("SPOTIFY_REDIRECT_URI"),
         serpapi_api_key=_optional("SERPAPI_API_KEY"),
         google_maps_api_key=_optional("GOOGLE_MAPS_API_KEY"),
+        astrology_api_key=_optional("AstrologyAPI"),
         filesystem_root=Path(
             os.environ.get("FILESYSTEM_ROOT", str(Path.home()))
         ).expanduser().resolve(),

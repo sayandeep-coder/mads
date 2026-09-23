@@ -1,0 +1,166 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #faf9f5;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --text: #3d3d3a;
+  --text-muted: #87867f;
+  --text-faint: #b3b2ab;
+  --accent: #d97757;
+  --accent-hover: #c86a4c;
+  --accent-text: #ffffff;
+  --border: #e8e6dc;
+  --border-strong: #d8d6ca;
+  --user-bubble: #f0eee5;
+  --code-bg: #f0eee5;
+  --danger: #c0574a;
+
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+}
+
+:root[data-theme="dark"] {
+  --bg: #262624;
+  --surface: #30302e;
+  --surface-raised: #383836;
+  --text: #f0eee5;
+  --text-muted: #a8a6a0;
+  --text-faint: #6f6e69;
+  --accent: #d97757;
+  --accent-hover: #e08b6c;
+  --accent-text: #262624;
+  --border: #3d3d3a;
+  --border-strong: #4a4a47;
+  --user-bubble: #383836;
+  --code-bg: #1f1f1d;
+  --danger: #e0847a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #262624;
+    --surface: #30302e;
+    --surface-raised: #383836;
+    --text: #f0eee5;
+    --text-muted: #a8a6a0;
+    --text-faint: #6f6e69;
+    --accent: #d97757;
+    --accent-hover: #e08b6c;
+    --accent-text: #262624;
+    --border: #3d3d3a;
+    --border-strong: #4a4a47;
+    --user-bubble: #383836;
+    --code-bg: #1f1f1d;
+    --danger: #e0847a;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-text-faint: var(--text-faint);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-text: var(--accent-text);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-user-bubble: var(--user-bubble);
+  --color-code-bg: var(--code-bg);
+  --color-danger: var(--danger);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+button,
+textarea,
+input,
+select {
+  font: inherit;
+  touch-action: manipulation;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chat-input:focus-visible {
+  outline: none;
+}
+
+.mads-hero {
+  isolation: isolate;
+  background:
+    radial-gradient(ellipse 82% 42% at 50% 2%, #ffffff 0%, rgba(255, 255, 255, 0.9) 34%, transparent 72%),
+    linear-gradient(
+      180deg,
+      #f9fafc 0%,
+      #e8edff 19%,
+      #7897ff 39%,
+      #b978ec 54%,
+      #f066cf 67%,
+      #ff3989 82%,
+      #ff573d 100%
+    );
+}
+
+.mads-hero-glow {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(ellipse 52% 35% at 8% 88%, rgba(255, 93, 36, 0.95), transparent 72%),
+    radial-gradient(ellipse 48% 38% at 92% 86%, rgba(255, 34, 144, 0.92), transparent 72%),
+    radial-gradient(ellipse 42% 34% at 50% 104%, rgba(255, 54, 35, 0.82), transparent 76%);
+  filter: saturate(1.12);
+}
+
+/* The chat input signals focus via its own wrapper border
+   (focus-within:border-border-strong in ChatInput.tsx), not a ring — the
+   default focus-visible outline above would otherwise draw a second,
+   clashing accent-colored box around it. */
+textarea:focus-visible {
+  outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

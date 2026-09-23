@@ -223,3 +223,8 @@ __marimo__/
 # Mads runtime data: encrypted OAuth tokens, memory store — never commit
 .mads/
 
+# Node (excel-addin/, and any other Node subproject not covered by its
+# own .gitignore like web/)
+node_modules/
+npm-debug.log*
+
