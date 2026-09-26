@@ -11,13 +11,32 @@ from google import genai
 from google.genai import types as genai_types
 
 from agent.system_prompt import build_system_prompt
-from agent.tools import build_gemini_tools
+from agent.tools import mcp_tool_to_function_declaration
 from config.settings import Settings
 from mcp_servers.manager import MCPManager, MCPToolNotFoundError
+from skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
 
 _MAX_TOOL_CALL_ROUNDS = 8
+
+_LOAD_SKILL_TOOL = genai_types.FunctionDeclaration(
+    name="load_skill",
+    description=(
+        "Load a Mads skill by name to get its detailed instructions and unlock its tools for the "
+        "rest of this conversation. Skills are how document generation/reading actually works — "
+        "the tools for building a PDF, PPTX, Excel file, or Word doc are NOT available until you "
+        "load the matching skill first. Call this before attempting any document task; after "
+        "loading, its tools appear and its instructions tell you exactly how to use them well."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "The skill's name, exactly as listed in the skill index."},
+        },
+        "required": ["name"],
+    },
+)
 
 
 def _parse_tool_output(response_payload: dict[str, Any]) -> dict[str, Any]:
@@ -77,27 +96,50 @@ class Agent:
         adaptive_context: str = "",
         browser_mode: bool = False,
         excel_mode: bool = False,
+        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self._mcp = mcp_manager
         self._client = genai.Client(api_key=settings.gemini_api_key)
+        self._skills = skill_registry
+        # Names of skills whose real tools have been merged into the live
+        # tool list this session — see _ensure_skill_loaded. Starts empty
+        # every session/reset: skills are always loaded on demand fresh,
+        # same as Claude Code re-discovering skills each conversation.
+        self._loaded_skills: set[str] = set()
 
-        tools = build_gemini_tools(mcp_manager.list_tools())
-        config = genai_types.GenerateContentConfig(
-            system_instruction=build_system_prompt(
-                memory_context,
-                project_context,
-                adaptive_context,
-                browser_mode=browser_mode,
-                excel_mode=excel_mode,
-            ),
-            tools=tools or None,
+        self._base_declarations = [
+            mcp_tool_to_function_declaration(tool) for tool in mcp_manager.list_tools()
+        ]
+        if self._skills is not None and self._skills.all():
+            self._base_declarations.append(_LOAD_SKILL_TOOL)
+
+        self._system_instruction = build_system_prompt(
+            memory_context,
+            project_context,
+            adaptive_context,
+            browser_mode=browser_mode,
+            excel_mode=excel_mode,
+            skills_index=self._skills.render_index() if self._skills is not None else "",
         )
+
         self._model = settings.model
-        self._config = config
+        self._config = self._build_config(self._base_declarations)
         self.reset()
 
+    def _build_config(self, declarations: list[genai_types.FunctionDeclaration]) -> genai_types.GenerateContentConfig:
+        tools = [genai_types.Tool(function_declarations=declarations)] if declarations else None
+        return genai_types.GenerateContentConfig(system_instruction=self._system_instruction, tools=tools)
+
     def reset(self) -> None:
-        """Start a fresh model conversation while keeping tools and context."""
+        """Start a fresh model conversation while keeping tools and context.
+
+        Also drops any skills loaded during the previous conversation —
+        skills are re-discovered per conversation, not carried across a
+        reset, matching build_gemini_tools's original always-fresh
+        behavior for the base (non-skill) tool set.
+        """
+        self._loaded_skills = set()
+        self._config = self._build_config(self._base_declarations)
         self._chat = self._client.chats.create(model=self._model, config=self._config)
 
     async def send(self, message: str) -> str:
@@ -119,10 +161,15 @@ class Agent:
 
         Each round uses send_message_stream rather than send_message so
         text actually arrives incrementally instead of all at once at the
-        end — a round that asks for tool calls streams no text (Gemini
-        emits those as a single chunk with no .text, confirmed against the
-        live API), so text_delta only ever fires on the round that produces
-        the final reply.
+        end. A round can end either with more function calls (Gemini wants
+        to act again) or with none (this round's text is the actual final
+        answer) — and Gemini sometimes narrates its plan ("okay, let me
+        load the pdf skill...") in the SAME round it also requests a tool
+        call, rather than always staying silent on tool-calling rounds.
+        That narration is commentary on an action still in progress, not
+        part of the answer, so only a round that ends with zero function
+        calls ever contributes to full_text/text_delta — every other
+        round's text is discarded once its tool calls are dispatched.
         """
         full_text = ""
         next_message: Any = message
@@ -134,16 +181,25 @@ class Agent:
             async for chunk in self._stream_chunks(next_message):
                 if chunk.text:
                     round_text += chunk.text
-                    full_text += chunk.text
-                    yield AgentEvent(type="text_delta", text=chunk.text)
                 if chunk.function_calls:
                     function_calls = chunk.function_calls
 
-            if not function_calls:
+            if function_calls:
+                # Gemini sometimes narrates its plan in the same round it
+                # requests tool calls ("okay let me load the pdf skill...")
+                # — that text is commentary on an action still in progress,
+                # not part of the actual answer, so it's dropped here rather
+                # than streamed. Only text from a round that ends with NO
+                # further tool calls (the round that actually produces the
+                # final answer) ever reaches full_text/text_delta — see
+                # the `else` branch below.
+                for call in function_calls:
+                    yield AgentEvent(type="tool_call_started", tool_name=call.name, tool_args=call.args or {})
+            else:
+                if round_text:
+                    full_text += round_text
+                    yield AgentEvent(type="text_delta", text=round_text)
                 break
-
-            for call in function_calls:
-                yield AgentEvent(type="tool_call_started", tool_name=call.name, tool_args=call.args or {})
 
             # Independent tool calls Gemini requested in the same turn (e.g.
             # research mode's Context7 + GitHub + Fetch + YouTube lookups)
@@ -214,8 +270,14 @@ class Agent:
         logger.info("Tool call: %s(%s)", call.name, call.args)
 
         try:
-            result = await self._mcp.call_tool(call.name, call.args or {})
-            payload = {"error": result.text} if result.is_error else {"output": result.text}
+            if call.name == "load_skill":
+                payload = {"output": str(await self._load_skill((call.args or {}).get("name", "")))}
+            elif self._skills is not None and self._skills.tool_owner(call.name) is not None:
+                result = await self._call_skill_tool(call.name, call.args or {})
+                payload = {"output": str(result)}
+            else:
+                result = await self._mcp.call_tool(call.name, call.args or {})
+                payload = {"error": result.text} if result.is_error else {"output": result.text}
         except MCPToolNotFoundError as exc:
             payload = {"error": str(exc)}
         except Exception as exc:  # noqa: BLE001 — surface any tool failure back to the model
@@ -223,3 +285,55 @@ class Agent:
             payload = {"error": f"Tool execution failed: {exc}"}
 
         return genai_types.Part.from_function_response(name=call.name, response=payload)
+
+    async def _call_skill_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        assert self._skills is not None
+        skill = self._skills.tool_owner(name)
+        if skill is None:
+            raise MCPToolNotFoundError(f"No loaded skill exposes tool {name!r}")
+        if skill.name not in self._loaded_skills:
+            # Gemini can, in principle, call a skill's tool without having
+            # called load_skill first if it somehow already knows the
+            # tool's shape (e.g. from an earlier turn before a reset) —
+            # load it transparently rather than erroring, since the result
+            # is identical to the model calling load_skill itself first.
+            await self._load_skill(skill.name)
+        return await skill.dispatch(name, arguments)
+
+    async def _load_skill(self, name: str) -> dict[str, Any]:
+        """Load a skill by name: merge its tools into the live Gemini tool
+        list and recreate the chat session with that expanded config,
+        carrying the full conversation history forward so nothing is lost.
+
+        Gemini's SDK has no API to mutate an existing Chat's tools in
+        place — chats.create(..., history=...) is the documented way to
+        continue a conversation under a new config, so that's what this
+        does every time a not-yet-loaded skill is requested.
+        """
+        if self._skills is None:
+            raise ValueError("No skills are configured for this agent.")
+
+        skill = self._skills.get(name)
+        if skill is None:
+            available = ", ".join(sorted(s.name for s in self._skills.all())) or "(none)"
+            raise ValueError(f"No skill named {name!r}. Available skills: {available}")
+
+        if skill.name in self._loaded_skills:
+            return {"skill": skill.name, "status": "already loaded", "instructions": skill.instructions}
+
+        new_declarations = list(self._base_declarations)
+        for already_loaded_name in self._loaded_skills:
+            already_loaded_skill = self._skills.get(already_loaded_name)
+            if already_loaded_skill is not None:
+                new_declarations.extend(
+                    mcp_tool_to_function_declaration(tool) for tool in already_loaded_skill.tools
+                )
+        new_declarations.extend(mcp_tool_to_function_declaration(tool) for tool in skill.tools)
+
+        history = self._chat.get_history()
+        self._config = self._build_config(new_declarations)
+        self._chat = self._client.chats.create(model=self._model, config=self._config, history=history)
+        self._loaded_skills.add(skill.name)
+
+        logger.info("Loaded skill %r — tools now: %s", skill.name, [d.name for d in new_declarations])
+        return {"skill": skill.name, "status": "loaded", "instructions": skill.instructions}

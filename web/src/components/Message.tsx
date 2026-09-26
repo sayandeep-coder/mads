@@ -1,9 +1,100 @@
-import type { ChatMessage } from "@/lib/types";
-import { Fragment, type ReactNode } from "react";
+import type { ChatMessage, GeneratedFile } from "@/lib/types";
+import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
 import { DownloadChip } from "./DownloadChip";
 import { ToolCallRow } from "./ToolCallRow";
 
-export function Message({ message }: { message: ChatMessage }) {
+// One character revealed roughly every this many milliseconds — paced by
+// wall-clock time (via performance.now(), see below), not by counting
+// animation frames, so the speed is the same regardless of frame rate.
+const MS_PER_CHAR = 20;
+
+// Above this length, skip the per-character animation and render the
+// reply directly. A long reply (a big markdown table, a detailed
+// multi-paragraph summary) re-parsing itself from scratch on every single
+// added character is real, unbounded work that piles up over the whole
+// reveal — for a few hundred characters that's cheap, for several
+// thousand it can be enough sustained main-thread work to crash the tab's
+// renderer outright. Real chat products cap animated reveal to short
+// replies for exactly this reason; a long reply reads fine appearing at
+// once, nobody needs to watch a 3,000-character answer type out letter by
+// letter anyway.
+const MAX_ANIMATED_LENGTH = 600;
+
+/**
+ * Reveals `fullText` one character at a time, independent of how large the
+ * chunks were that actually arrived over the network (Gemini streams whole
+ * sentences at once, not one character per event — painting each chunk
+ * verbatim looks like words popping in, not typing) and independent of
+ * whether the network stream itself has already finished — a reply that
+ * arrives in one fast burst still types out at a fixed pace instead of
+ * animating for a moment and then snapping the rest in the instant
+ * `streamDone` flips true.
+ *
+ * `enabled` only controls whether this message should animate AT ALL
+ * (false for a message that was already complete when it first rendered,
+ * e.g. loaded from history) — once animation starts for a message it runs
+ * to completion on its own schedule and is never interrupted or
+ * fast-forwarded by fullText's growth or the stream ending.
+ *
+ * A single requestAnimationFrame loop per mounted message, driven by
+ * elapsed wall-clock time rather than a fixed-interval timer — this keeps
+ * exactly one live callback per message (no per-tick setInterval churn as
+ * fullText grows), self-terminates the instant it catches up, and is
+ * always torn down on unmount via the effect cleanup, so a long
+ * conversation can never accumulate stray, uncleared timers.
+ */
+function useTypewriter(fullText: string, enabled: boolean): string {
+  const [shownLength, setShownLength] = useState(() => (enabled ? 0 : fullText.length));
+  const everEnabledRef = useRef(enabled);
+  if (enabled) everEnabledRef.current = true;
+  // Latches permanently once true — a reply that grows past the cap while
+  // still streaming stays in "render directly" mode for the rest of its
+  // life, rather than flip-flopping back to animating if it happened to
+  // dip under the threshold on an earlier delta.
+  const tooLongRef = useRef(fullText.length > MAX_ANIMATED_LENGTH);
+  if (fullText.length > MAX_ANIMATED_LENGTH) tooLongRef.current = true;
+
+  useEffect(() => {
+    if (!everEnabledRef.current || tooLongRef.current) {
+      setShownLength(fullText.length);
+      return;
+    }
+
+    let raf = 0;
+    let lastTickAt = performance.now();
+
+    const tick = (now: number) => {
+      const elapsed = now - lastTickAt;
+      const charsToReveal = Math.floor(elapsed / MS_PER_CHAR);
+
+      if (charsToReveal > 0) {
+        lastTickAt += charsToReveal * MS_PER_CHAR;
+        setShownLength((prev) => Math.min(prev + charsToReveal, fullText.length));
+      }
+
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+
+    return () => cancelAnimationFrame(raf);
+  }, [fullText]);
+
+  return fullText.slice(0, Math.min(shownLength, fullText.length));
+}
+
+export function Message({
+  message,
+  onOpenFile,
+}: {
+  message: ChatMessage;
+  onOpenFile?: (file: GeneratedFile) => void;
+}) {
+  // Only animate while the reply is actually still streaming in — once a
+  // turn is done (or for a re-rendered message from earlier in the
+  // conversation), show it instantly rather than replaying the typing
+  // effect every time this component happens to re-mount.
+  const displayedText = useTypewriter(message.text, message.role === "assistant" && !message.streamDone);
+
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
@@ -14,7 +105,12 @@ export function Message({ message }: { message: ChatMessage }) {
     );
   }
 
-  const showTyping = message.pending && message.toolCalls.length === 0 && !message.text;
+  // Show the typing indicator any time we're still waiting on the reply's
+  // own text — whether or not tool calls happened first. Gating this on
+  // "no tool calls yet" left a dead gap between the last tool call
+  // finishing and the first word of text actually appearing.
+  const showTyping = message.pending && !displayedText;
+  const isTyping = message.pending && displayedText.length < message.text.length;
 
   return (
     <div className="flex flex-col gap-2.5">
@@ -29,9 +125,10 @@ export function Message({ message }: { message: ChatMessage }) {
       {showTyping ? (
         <TypingIndicator />
       ) : (
-        message.text && (
+        displayedText && (
           <div className="max-w-[75ch] text-[15px] leading-relaxed text-text">
-            <MarkdownText text={message.text} />
+            <MarkdownText text={displayedText} />
+            {isTyping && <span className="typing-caret" aria-hidden="true" />}
           </div>
         )
       )}
@@ -39,7 +136,7 @@ export function Message({ message }: { message: ChatMessage }) {
       {message.files.length > 0 && (
         <div className="flex flex-col gap-1.5 sm:max-w-xs">
           {message.files.map((file) => (
-            <DownloadChip key={file.path} file={file} />
+            <DownloadChip key={file.path} file={file} onOpen={onOpenFile} />
           ))}
         </div>
       )}

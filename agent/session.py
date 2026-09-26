@@ -17,7 +17,6 @@ from mcp_servers.servers import search as search_server
 from mcp_servers.servers import spotify as spotify_server
 from mcp_servers.servers import youtube as youtube_server
 from mcp_servers.servers.browser_control import BrowserControlProvider
-from mcp_servers.servers.document_intelligence import DocumentIntelligenceProvider
 from mcp_servers.servers.excel_control import ExcelControlProvider
 from mcp_servers.servers.google_workspace import GoogleWorkspaceProvider
 from mcp_servers.servers.image import ImageProvider
@@ -27,6 +26,7 @@ from memory.recall import build_recall_summary
 from planner.models import Project
 from planner.planner import Planner
 from planner.provider import PlannerProvider
+from skills import build_registry
 
 # Shared session-assembly logic — every entrypoint that wants a live Mads
 # session (the CLI REPL, the web backend) builds one through here, so the
@@ -42,7 +42,6 @@ KNOWN_SERVER_NAMES = [
     "spotify",
     "search",
     "maps",
-    "document_intelligence",
     "memory",
     "system",
     "image",
@@ -76,12 +75,10 @@ def build_providers(
     from mcp_servers.servers.astrology import AstrologyProvider
     if AstrologyProvider.is_available(settings):
         providers.append(AstrologyProvider(settings))
-        
-    from mcp_servers.servers.pdf_annotator import PdfAnnotatorProvider
-    if PdfAnnotatorProvider.is_available(settings):
-        providers.append(PdfAnnotatorProvider(settings))
-        
-    providers.append(DocumentIntelligenceProvider(settings))
+
+    # Document generation/reading (PDF, PPTX, Excel, Docs) is no longer an
+    # always-on provider — it's registered as skills instead (see
+    # skills/build_registry), loaded into the live tool list on demand.
     providers.append(MemoryProvider(settings))
     providers.append(SystemProvider(settings))
     providers.append(ImageProvider(settings))
@@ -138,6 +135,7 @@ async def build_session(
         memory_context=memory_context,
         project_context=project_context,
         adaptive_context=adaptive_context,
+        skill_registry=build_registry(settings),
     )
 
     return Session(settings=settings, mcp_manager=mcp_manager, agent=agent)
@@ -178,6 +176,7 @@ async def build_browser_session(base_settings: Settings, bridge) -> Session:
         mcp_manager=mcp_manager,
         memory_context=memory_context,
         browser_mode=True,
+        skill_registry=build_registry(base_settings),
     )
 
     return Session(settings=base_settings, mcp_manager=mcp_manager, agent=agent)
@@ -205,6 +204,7 @@ async def build_excel_session(base_settings: Settings, bridge) -> Session:
         mcp_manager=mcp_manager,
         memory_context=memory_context,
         excel_mode=True,
+        skill_registry=build_registry(base_settings),
     )
 
     return Session(settings=base_settings, mcp_manager=mcp_manager, agent=agent)

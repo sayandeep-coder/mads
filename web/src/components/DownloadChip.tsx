@@ -16,6 +16,11 @@ const KIND_LABEL: Record<GeneratedFile["kind"], string> = {
   file: "File",
 };
 
+// Kinds the in-app split-pane preview (PreviewPane) actually knows how to
+// render — everything else still falls back to the chip's original
+// share/download-only behavior, same as before this feature existed.
+const PREVIEWABLE_KINDS: ReadonlySet<GeneratedFile["kind"]> = new Set(["pdf", "xlsx"]);
+
 function fileUrl(file: GeneratedFile): string {
   return `${API_BASE}/api/files?path=${encodeURIComponent(file.path)}`;
 }
@@ -29,15 +34,22 @@ function fileUrl(file: GeneratedFile): string {
  * (on mount, via useEffect below) so share() can fire with zero awaits
  * ahead of it inside the click handler.
  */
-export function DownloadChip({ file }: { file: GeneratedFile }) {
+export function DownloadChip({
+  file,
+  onOpen,
+}: {
+  file: GeneratedFile;
+  onOpen?: (file: GeneratedFile) => void;
+}) {
   const [status, setStatus] = useState<"idle" | "loading" | "error">("idle");
   const [preparedFile, setPreparedFile] = useState<File | null>(null);
+  const canPreview = PREVIEWABLE_KINDS.has(file.kind) && Boolean(onOpen);
 
   // Prefetch as soon as the chip appears — a chip only renders once the
   // file already exists server-side, so there's nothing to wait for. This
-  // is what makes the later navigator.share() call in handleTap able to
-  // fire synchronously within the click, which iOS requires to show the
-  // actual share sheet instead of just opening the file.
+  // is what makes the later navigator.share() call in handleShareOrDownload
+  // able to fire synchronously within the click, which iOS requires to
+  // show the actual share sheet instead of just opening the file.
   useEffect(() => {
     let cancelled = false;
     fetch(fileUrl(file))
@@ -49,14 +61,14 @@ export function DownloadChip({ file }: { file: GeneratedFile }) {
         if (!cancelled) setPreparedFile(new File([blob], file.name, { type: blob.type }));
       })
       .catch(() => {
-        // Silent — handleTap falls back to fetching on tap if this failed.
+        // Silent — handleShareOrDownload falls back to fetching on tap if this failed.
       });
     return () => {
       cancelled = true;
     };
   }, [file]);
 
-  const handleTap = () => {
+  const handleShareOrDownload = () => {
     if (!preparedFile) {
       // Prefetch hasn't finished yet (slow network, or tapped instantly)
       // — fall back to a plain download. This still works, it just won't
@@ -108,22 +120,50 @@ export function DownloadChip({ file }: { file: GeneratedFile }) {
     URL.revokeObjectURL(blobUrl);
   };
 
+  const handleChipTap = () => {
+    if (canPreview) {
+      onOpen!(file);
+      return;
+    }
+    handleShareOrDownload();
+  };
+
   return (
-    <button
-      type="button"
-      onClick={handleTap}
-      disabled={status === "loading"}
-      className="flex items-center gap-2.5 rounded-xl border border-border bg-surface px-3 py-2.5 text-left text-[13px] transition-colors hover:border-border-strong disabled:opacity-60"
+    <div
+      className="flex items-center gap-2.5 rounded-xl border border-border bg-surface px-3 py-2.5 text-left text-[13px] transition-colors hover:border-border-strong"
     >
-      <FileIcon kind={file.kind} />
-      <span className="flex min-w-0 flex-1 flex-col">
-        <span className="truncate font-medium text-text">{file.name}</span>
-        <span className="text-text-muted">
-          {status === "loading" ? "Preparing…" : status === "error" ? "Couldn't open — tap to retry" : KIND_LABEL[file.kind]}
+      <button
+        type="button"
+        onClick={handleChipTap}
+        disabled={status === "loading"}
+        className="flex min-w-0 flex-1 items-center gap-2.5 disabled:opacity-60"
+      >
+        <FileIcon kind={file.kind} />
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate font-medium text-text">{file.name}</span>
+          <span className="text-text-muted">
+            {status === "loading"
+              ? "Preparing…"
+              : status === "error"
+                ? "Couldn't open — tap to retry"
+                : canPreview
+                  ? `${KIND_LABEL[file.kind]} · tap to open`
+                  : KIND_LABEL[file.kind]}
+          </span>
         </span>
-      </span>
-      <ShareIcon />
-    </button>
+      </button>
+
+      <button
+        type="button"
+        onClick={handleShareOrDownload}
+        disabled={status === "loading"}
+        aria-label="Share or download"
+        title="Share or download"
+        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-code-bg hover:text-text disabled:opacity-60"
+      >
+        <ShareIcon />
+      </button>
+    </div>
   );
 }
 
@@ -146,7 +186,7 @@ function FileIcon({ kind }: { kind: GeneratedFile["kind"] }) {
 
 function ShareIcon() {
   return (
-    <svg viewBox="0 0 20 20" width="16" height="16" fill="none" className="shrink-0 text-text-muted">
+    <svg viewBox="0 0 20 20" width="16" height="16" fill="none" className="shrink-0">
       <path
         d="M10 3v9M10 3l-3 3M10 3l3 3M4.5 10v5a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-5"
         stroke="currentColor"

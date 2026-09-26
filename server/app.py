@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import re
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -21,6 +24,15 @@ from server.browser_bridge import browser_bridge, excel_bridge
 logger = logging.getLogger(__name__)
 
 _state: dict[str, object] = {}
+
+# Where files the web UI uploads (e.g. an attachment from ChatInput's "+"
+# button) land on disk. Lives under the home directory, which
+# settings.allowed_roots always includes, so an uploaded file is
+# immediately readable by every filesystem-scoped tool/skill regardless of
+# which project is currently active.
+_UPLOAD_DIR = Path.home() / ".mads" / "uploads"
+
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def _configure_logging(log_level: str) -> None:
@@ -218,14 +230,35 @@ async def reset_chat():
     return {"ok": True}
 
 
-@app.get("/api/files")
-async def download_file(path: str):
-    """Serve a file Mads generated (PDF/PPTX/image) so the web UI can offer
-    a download — the phone has no access to the Mac's disk otherwise.
+@app.post("/api/upload")
+async def upload_file(file: UploadFile):
+    """Accept a file the web UI's chat input attached (via ChatInput's "+"
+    button) and save it under _UPLOAD_DIR, returning the path the chat
+    message can then reference so Gemini/the skills system can read it.
 
-    Scoped to the same allowed_roots boundary the filesystem/document tools
-    already enforce, so this can't be used to read arbitrary paths off the
-    Mac just because a request happens to specify one.
+    No dedicated size cap beyond FastAPI/Starlette's own request-body
+    handling — this server already runs trusted-LAN-only (see the
+    CORSMiddleware comment above), same threat model as every other
+    filesystem-touching endpoint here.
+    """
+    original_name = file.filename or "upload"
+    safe_name = _UNSAFE_FILENAME_CHARS.sub("_", original_name).strip("._") or "upload"
+
+    _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    dest = _UPLOAD_DIR / f"{int(time.time())}-{uuid.uuid4().hex[:8]}-{safe_name}"
+
+    with dest.open("wb") as out:
+        while chunk := await file.read(1024 * 1024):
+            out.write(chunk)
+
+    return {"path": str(dest), "name": original_name, "size_bytes": dest.stat().st_size}
+
+
+def _resolve_generated_file(path: str) -> Path:
+    """Shared path check for every endpoint that serves a file Mads
+    generated — same allowed_roots boundary the filesystem/document tools
+    already enforce, so none of these can be used to reach arbitrary paths
+    off the Mac just because a request happens to specify one.
     """
     session: Session = _state["session"]  # type: ignore[assignment]
     settings = session.settings
@@ -235,7 +268,15 @@ async def download_file(path: str):
         raise HTTPException(status_code=403, detail="Path is outside the allowed directories")
     if not resolved.is_file():
         raise HTTPException(status_code=404, detail="File not found")
+    return resolved
 
+
+@app.get("/api/files")
+async def download_file(path: str):
+    """Serve a file Mads generated (PDF/PPTX/image) so the web UI can offer
+    a download — the phone has no access to the Mac's disk otherwise.
+    """
+    resolved = _resolve_generated_file(path)
     media_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
     return FileResponse(
         resolved,
@@ -243,3 +284,37 @@ async def download_file(path: str):
         filename=resolved.name,
         headers={"Content-Disposition": f'attachment; filename="{resolved.name}"'},
     )
+
+
+@app.get("/api/files/preview")
+async def preview_file(path: str):
+    """Same file, but served inline rather than as an attachment — for the
+    web UI's in-app preview panel (an <iframe src="..."> for a PDF, e.g.).
+    A browser won't render a PDF inline if the server says
+    Content-Disposition: attachment, so this is a genuinely different
+    response, not just download_file with a different name.
+    """
+    resolved = _resolve_generated_file(path)
+    media_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+    return FileResponse(
+        resolved,
+        media_type=media_type,
+        headers={"Content-Disposition": f'inline; filename="{resolved.name}"'},
+    )
+
+
+@app.get("/api/files/xlsx-preview")
+async def preview_xlsx(path: str):
+    """Read every sheet of a generated .xlsx workbook and return it as
+    plain JSON rows for the web UI to render as an HTML table — there's no
+    native browser renderer for spreadsheets the way there is for PDFs, so
+    the preview panel builds its own simple table view from this data
+    rather than trying to embed the real file.
+    """
+    resolved = _resolve_generated_file(path)
+    if resolved.suffix.lower() not in {".xlsx", ".xlsm"}:
+        raise HTTPException(status_code=400, detail=f"Not a spreadsheet: {resolved.suffix!r}")
+
+    from mcp_servers.servers.document_intelligence._xlsx_preview import read_all_sheets_for_preview
+
+    return read_all_sheets_for_preview(resolved)

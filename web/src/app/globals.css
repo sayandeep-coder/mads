@@ -164,3 +164,25 @@ textarea:focus-visible {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Blinking cursor shown at the end of an assistant reply while it's still
+   typing out (Message.tsx's useTypewriter) — mirrors the caret Claude
+   shows mid-stream. Inline-block so it sits on the same line as the last
+   revealed word rather than always dropping to a new line. */
+.typing-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: mads-caret-blink 0.8s step-end infinite;
+}
+@keyframes mads-caret-blink {
+  0%, 49% {
+    opacity: 1;
+  }
+  50%, 100% {
+    opacity: 0;
+  }
+}

@@ -1,16 +1,21 @@
 # Mads
 
-Mads is a personal AI Chief of Staff — a CLI-based AI operating system built around one core
-idea: **one brain, many tools.** Gemini decides what to do and which capability to use; there is
-no keyword routing, no multi-agent orchestration, and no hardcoded "if X then call Y" logic
-anywhere in the codebase. Every capability — reading a file, searching Gmail, controlling
-Spotify, checking battery status, planning your day, recalling something you told ChatGPT a year
-ago — is just a function Gemini can choose to call.
+Mads is a personal AI Chief of Staff — an AI operating system built around one core idea:
+**one brain, many tools.** Gemini decides what to do and which capability to use; there is no
+keyword routing, no multi-agent orchestration, and no hardcoded "if X then call Y" logic
+anywhere in the codebase. Every capability — reading a file, searching Gmail, controlling Spotify,
+checking battery status, planning your day, recalling something you told ChatGPT a year ago,
+annotating a PDF, or reading the cells in a workbook open in Excel — is just a function Gemini
+can choose to call.
 
-Two things sit above the tool layer without breaking that model: **Advanced Planner**, which
-gives Mads standing awareness of your active project, tasks, and prompts; and **Adaptive
-Intelligence**, which learns durable facts about you from imported conversation history, subject
-to your explicit approval before anything is trusted.
+Mads runs everywhere you work: as a **CLI REPL**, a **web chat app**, a **Chrome / Edge browser
+extension** (side panel that can see and act on the page you're looking at), and a **Microsoft
+Excel add-in** (task pane that can read and write the workbook that's currently open).
+
+Two things sit above the tool layer without breaking that model: **Advanced Planner**, which gives
+Mads standing awareness of your active project, tasks, and prompts; and **Adaptive Intelligence**,
+which learns durable facts about you from imported conversation history, subject to your explicit
+approval before anything is trusted.
 
 ## Why this architecture
 
@@ -25,24 +30,42 @@ frameworks before they're needed. Mads deliberately avoids both:
   YouTube at once), those are *concurrent tool calls within the same reasoning turn*
   (`asyncio.gather`), not separate agent instances with their own reasoning loops.
 - **Every capability looks the same to the agent.** Whether a tool spawns a real MCP server
-  subprocess, calls a REST API directly, or shells out to `osascript`, the agent only ever sees a
-  `ToolProvider`: `list_tools()` + `call_tool()`. It has no idea which is which, and doesn't need
-  to.
+  subprocess, calls a REST API directly, shells out to `osascript`, or calls `Excel.run()` in the
+  task pane, the agent only ever sees a `ToolProvider`: `list_tools()` + `call_tool()`. It has no
+  idea which is which, and doesn't need to.
+- **Skills load on demand, not up front.** Document-generation capabilities (PDF, PPTX, Excel,
+  Docs) are bundled into self-contained `Skill` objects. Gemini always sees a one-line index of
+  available skills. Full tool schemas and usage instructions only load for a skill once it's
+  actually invoked, keeping the context window clean on turns that don't need them.
 - **Intelligence layers orchestrate, they don't replace.** Advanced Planner and Adaptive
   Intelligence sit *above* the tool layer — they shape what the agent already knows going into a
-  conversation (system-prompt context) and expose a few extra tools of their own, but they never
-  bypass the same `ToolProvider` interface everything else uses.
+  conversation and expose a few extra tools of their own, but they never bypass the same
+  `ToolProvider` interface everything else uses.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    User(["Sayan"]) --> CLI["cli/main.py — REPL"]
-    CLI --> Planner["planner/planner.py — Planner"]
-    CLI --> AdaptiveProfile["adaptive/profile.py — AdaptiveProfile"]
-    CLI --> Agent["agent/agent.py — Agent"]
-    Agent <--> Gemini["Gemini 2.5 (function calling)"]
+    User(["User"]) --> CLI["cli/main.py — REPL"]
+    User --> Web["web/ — Chat Web App"]
+    User --> Ext["extension/ — Chrome/Edge Extension"]
+    User --> Addin["excel-addin/ — Office Task Pane"]
+
+    CLI --> Session["agent/session.py — build_session()"]
+    Web --> Session
+    Ext --> BrowserChat["server/app.py\n/api/browser/chat\n/ws/browser"]
+    Addin --> ExcelChat["server/app.py\n/api/excel/chat\n/ws/excel"]
+
+    BrowserChat --> Session
+    ExcelChat --> Session
+
+    Session --> Agent["agent/agent.py — Agent"]
+    Session --> Planner["planner/ — Advanced Planner"]
+    Session --> AdaptiveProfile["adaptive/ — AdaptiveProfile"]
+
+    Agent <--> Gemini["Gemini (function calling)"]
     Agent --> Manager["mcp_servers/manager.py — MCPManager"]
+    Agent --> SkillRegistry["skills/ — SkillRegistry"]
 
     Planner -. render_system_context .-> Agent
     AdaptiveProfile -. render_context .-> Agent
@@ -66,20 +89,31 @@ flowchart TB
     Local --> MEM["Memory Engine<br/>SQLite"]
     Local --> PLN["Planner Tools<br/>projects · tasks · prompts · plans"]
     Local --> ADP["Adaptive Tools<br/>approval queue · learned profile"]
+    Local --> AST["Astrology<br/>FreeAstrologyAPI"]
+    Local --> PDF_A["PDF Annotator<br/>PyMuPDF"]
+
+    SkillRegistry --> SKP["PDF Skill<br/>read · create · annotate · compare"]
+    SkillRegistry --> SKE["Excel Skill<br/>read · create (tables, charts, formats)"]
+    SkillRegistry --> SKD["Docs Skill<br/>read · create · compare"]
+    SkillRegistry --> SKX["PPTX Skill<br/>read · create"]
 
     GW -.OAuth.-> OAuthMgr["auth/oauth_manager.py<br/>OAuthManager + adapters"]
     SP -.OAuth.-> OAuthMgr
     OAuthMgr --> TokenStore[("~/.mads/auth/*.enc<br/>Fernet-encrypted")]
 
     MEM --> MemDB[("~/.mads/memory.sqlite3")]
-    PLN --> PlanFiles[("~/.mads/projects/&lt;slug&gt;/*.json")]
+    PLN --> PlanFiles[("~/.mads/projects/<slug>/*.json")]
     ADP --> AdaptiveFiles[("~/.mads/adaptive/*.json")]
+
+    Ext -.WebSocket<br/>/ws/browser.-> BrowserChat
+    Addin -.WebSocket<br/>/ws/excel.-> ExcelChat
 
     style Gemini fill:#4285f4,color:#fff
     style Agent fill:#1a73e8,color:#fff
     style Manager fill:#34a853,color:#fff
     style Planner fill:#fbbc04,color:#000
     style AdaptiveProfile fill:#ea4335,color:#fff
+    style SkillRegistry fill:#9c27b0,color:#fff
 ```
 
 **The agent never branches on tool identity.** `Agent.send()` sends a message, and for every
@@ -87,18 +121,11 @@ function call Gemini requests in that turn, dispatches to `MCPManager.call_tool(
 that's the entire routing logic. `MCPManager` resolves `name` to whichever `ToolProvider`
 registered it and returns the result. Independent calls in the same turn run concurrently.
 
-**Planner and AdaptiveProfile are not `ToolProvider`s themselves.** They're plain Python objects
-`cli/main.py` constructs once per session, used to render two blocks of system-prompt context
-(active project + plan, and approved learned facts) before the Agent is even built. Each also
-owns a *thin* `ToolProvider` (`PlannerProvider`, `AdaptiveProvider`) so Gemini can still query or
-mutate them mid-conversation — but the underlying objects are fully usable, testable, and
-inspectable with zero Gemini or MCP involvement.
-
 ## Request lifecycle
 
 ```mermaid
 sequenceDiagram
-    participant U as Sayan
+    participant U as User
     participant A as Agent
     participant G as Gemini
     participant M as MCPManager
@@ -122,6 +149,127 @@ sequenceDiagram
     G-->>A: final natural-language reply
     A-->>U: "You've got 2 events today... and 3 PRs waiting on your review..."
 ```
+
+## Surfaces
+
+Mads exposes the same agent over four distinct surfaces. All four talk to the same backend
+(`server/app.py`) and are backed by the same session — the same Gemini context, the same tools,
+the same memory.
+
+```mermaid
+flowchart LR
+    subgraph Clients
+        CLI["🖥️ CLI REPL<br/>uv run mads"]
+        Web["🌐 Web App<br/>localhost:5173"]
+        Ext["🔌 Chrome Extension<br/>side panel"]
+        Addin["📊 Excel Add-in<br/>Office task pane"]
+    end
+
+    subgraph Backend["FastAPI Backend (server/app.py)"]
+        API["/api/chat (SSE)"]
+        BrowserAPI["/api/browser/chat (SSE)"]
+        ExcelAPI["/api/excel/chat (SSE)"]
+        BrowserWS["/ws/browser (WebSocket)"]
+        ExcelWS["/ws/excel (WebSocket)"]
+        Upload["/api/upload"]
+        Files["/api/files"]
+    end
+
+    CLI --> API
+    Web --> API
+    Web --> Upload
+    Ext --> BrowserAPI
+    Ext <--> BrowserWS
+    Addin --> ExcelAPI
+    Addin <--> ExcelWS
+```
+
+### Chrome / Edge Extension (`extension/`)
+
+A Manifest v3 extension that adds a **side panel** to any tab. The side panel:
+
+- Connects to the Mads backend over **WebSocket** (`/ws/browser`) — the same
+  `WebSocketCommandBridge` pattern the Excel add-in uses.
+- Sends chat messages to `/api/browser/chat` using **SSE-over-fetch** (same streaming pattern
+  as the web app, since `EventSource` can't do POST).
+- Relays `browser_control` commands (`extract_page`, `navigate`, `click_element`, `type_text`,
+  `scroll_to`, `go_back`) from the backend to **`background.js`** via `chrome.runtime.sendMessage`.
+  Only the background service worker has `chrome.tabs` / `chrome.scripting` access; the side panel
+  page owns the socket so it isn't dropped on service-worker restart.
+- **Auto-reconnects** with exponential backoff (max 15 s delay) on close/restart — no manual
+  reconnect button needed.
+
+```mermaid
+flowchart LR
+    SidePanel["sidepanel.js<br/>(side panel page)"]
+    BG["background.js<br/>(service worker)"]
+    CS["content.js<br/>(injected in tab)"]
+    Backend["Mads Backend"]
+
+    SidePanel -- "POST /api/browser/chat (SSE)" --> Backend
+    SidePanel <-- "WebSocket /ws/browser\n(browser_control commands)" --> Backend
+    SidePanel -- "chrome.runtime.sendMessage" --> BG
+    BG -- "chrome.tabs.sendMessage" --> CS
+    CS -- "DOM actions (extract, click, type...)" --> BG
+```
+
+### Microsoft Excel Add-in (`excel-addin/`)
+
+An Office.js task pane add-in that embeds Mads **inside Excel**. Unlike the browser extension,
+this runs in the same Office process as the workbook, so it can call `Excel.run()` directly:
+
+- Connects over **WebSocket** (`/ws/excel`) to receive `excel_control` commands from the agent.
+- Executes: `list_sheets`, `read_range`, `write_range`, `get_selection`, `add_sheet`.
+- Handles **whole-row/column shorthand** (`"2:2"`, `"A:A"`) that Office.js doesn't natively
+  support — automatically translates them to real A1 addresses against the sheet's used range.
+- Returns **rich error info** from `OfficeExtension.Error` objects (code + debugInfo) instead of
+  generic "unexpected error" messages.
+- Uses `Office.onReady()` before touching any Office.js API, and auto-reconnects the WebSocket
+  with the same backoff logic as the browser extension.
+
+```mermaid
+flowchart LR
+    TP["taskpane.js<br/>(Office task pane)"]
+    XL["Excel Workbook<br/>(Excel.run / Office.js)"]
+    Backend["Mads Backend"]
+
+    TP -- "POST /api/excel/chat (SSE)" --> Backend
+    TP <-- "WebSocket /ws/excel\n(excel_control commands)" --> Backend
+    TP -- "Excel.run()\nlist_sheets / read_range\nwrite_range / get_selection\nadd_sheet" --> XL
+```
+
+## Skill System
+
+Document-generation capabilities are bundled as **Skills** — self-contained modules each providing
+their own usage instructions and tool schemas. The agent always sees a compact one-line index;
+full schemas only load when a skill is actually invoked, keeping the context lean.
+
+```mermaid
+flowchart TD
+    Agent["Agent"] --> Index["SkillRegistry.render_index()\n(1-line per skill, always visible)"]
+    Agent -- "load_skill('pdf')" --> Load["SkillRegistry.get('pdf')"]
+    Load --> Instructions["Full markdown instructions\n+ tool schemas → injected"]
+    Agent -- "tool call (e.g. create_pdf)" --> Dispatch["Skill.dispatch(name, args)"]
+
+    subgraph Skills
+        SPDF["pdf skill\nread_pdf · create_pdf\nannotate_pdf · extract_pdf_tables\ndiff_documents"]
+        SXLS["excel skill\nread_xlsx · create_excel\n(Tables · Charts · Formats)"]
+        SDOC["docs skill\nread_docx · create_docx\ndiff_documents"]
+        SPPT["pptx skill\nread_pptx · create_pptx"]
+    end
+
+    Load --> SPDF
+    Load --> SXLS
+    Load --> SDOC
+    Load --> SPPT
+```
+
+| Skill | Key tools |
+|---|---|
+| **pdf** | `read_pdf` (with OCR fallback), `create_pdf` (headings, tables, images, page breaks), `annotate_pdf` (circles + text on existing PDFs), `extract_pdf_tables`, `diff_documents` |
+| **excel** | `read_xlsx`, `create_excel` (real Tables, number formats, conditional formatting, native charts) |
+| **docs** | `read_docx`, `create_docx`, `diff_documents` |
+| **pptx** | `read_pptx`, `create_pptx` |
 
 ## Advanced Planner
 
@@ -148,7 +296,7 @@ flowchart TD
 
     SilentActivate --> Session
     ActivateLast --> Session
-    Register --> Session["_build_session():<br/>filesystem MCP scoped to project folder,<br/>render_system_context() → Agent"]
+    Register --> Session["build_session():<br/>filesystem MCP scoped to project folder,<br/>render_system_context() → Agent"]
     NoProject --> Session
 
     style Session fill:#1a73e8,color:#fff
@@ -171,8 +319,7 @@ flowchart TD
   (`~/.mads/projects/<slug>/prompts/`).
 - **Planning Engine** (`planner/planning_engine.py`): rule-based (no extra LLM call) — ranks open
   tasks by overdue → due-today → priority → recency, and surfaces a suggested prompt and next
-  task. Deliberately deterministic and free; this is the seam future adaptive prioritization
-  would plug into without changing its public surface.
+  task.
 - **Dashboard** (`planner/dashboard.py`): project identity, task counts and progress, current git
   branch, recent commits, recent documents, recommended next task — all computed fresh on each
   call, never cached.
@@ -230,7 +377,7 @@ flowchart TD
    conversations before spending any API call on them.
 4. **Classify** (`classifier.py`) — batched Gemini calls (~20 conversations/call, run
    concurrently) ask a plain yes/no: does this conversation contain anything durable worth
-   learning? Replaces keyword regex, which misses implicit signal.
+   learning?
 5. **Compress** (`compressor.py`) — strips filler/greetings, collapses code blocks, edge-truncates
    long conversations to ~1500 characters before the more expensive extraction call.
 6. **Extract** (`extractor.py`) — batched extraction into five categories: **preference**,
@@ -261,26 +408,28 @@ several `approve_candidate` calls at once) can no longer corrupt these files.
 | **Fetch** | Official `mcp-server-fetch` (uvx, stdio MCP) | — |
 | **Context7** | Official `@upstash/context7-mcp` (npx, stdio MCP) | — |
 | **GitHub** | Official `github-mcp-server` Go binary, read-only mode (stdio MCP) | — |
-| **Google Workspace** | Direct Gmail/Calendar/Drive/Docs/Sheets/Forms REST APIs (OAuth) — official per-app MCP servers exist but can't send/write or cover Docs/Sheets/Forms, so this calls the APIs directly | 22 |
-| **YouTube** | Direct YouTube Data API v3 (API key) — the community MCP server for this is broken against current SDK versions | 4 |
+| **Google Workspace** | Direct Gmail/Calendar/Drive/Docs/Sheets/Forms REST APIs (OAuth) | 22 |
+| **YouTube** | Direct YouTube Data API v3 (API key) | 4 |
 | **Spotify** | Direct Spotify Web API (OAuth) | 2 |
 | **Search** | SerpApi (API key) | 1 |
 | **Maps** | Google Maps API (API key) | 3 |
 | **Document Intelligence** | PyMuPDF, python-docx, openpyxl, reportlab, python-pptx — local only, no MCP | 7 |
+| **PDF Annotator** | PyMuPDF — circle text and add notes on existing PDFs | 1 |
 | **Image** | Pollinations — local only, no MCP | 1 |
 | **System Tool** | `osascript`, `psutil`, native macOS commands — local only, no MCP | 13 |
 | **Memory Engine** | SQLite (`~/.mads/memory.sqlite3`) — preference/project/decision/person/identity | 5 |
 | **Planner** | `planner/` — projects, tasks, prompts, daily plan, dashboard | 14 |
 | **Adaptive Intelligence** | `adaptive/` — approval queue + learned profile (import itself is CLI-only, not a tool) | 4 |
+| **Astrology** | FreeAstrologyAPI (API key) — Vedic chart, dashas, good/bad times | 1 |
+| **Skills (PDF)** | `skills/pdf.py` — read (OCR fallback), create, annotate, extract tables, diff | 5 |
+| **Skills (Excel)** | `skills/excel.py` — read, create with real Tables/Charts/Formats | 2 |
+| **Skills (Docs)** | `skills/docs.py` — read, create, diff | 3 |
+| **Skills (PPTX)** | `skills/pptx.py` — read, create | 2 |
+| **Browser Control** | Chrome extension ↔ `/ws/browser` WebSocket — extract page, click, type, navigate | 6 |
+| **Excel Control** | Office add-in ↔ `/ws/excel` WebSocket — list sheets, read/write ranges, get selection | 5 |
 
 (External stdio MCP servers don't expose a fixed tool count from this codebase — it's whatever
 that server's own release defines.)
-
-Where an official MCP server exists *and* covers what's needed (Filesystem, Fetch, Context7,
-GitHub), Mads uses it. Where the official option is missing, broken, or too narrow (Google
-Workspace write operations, YouTube transcripts, Spotify, Search, Maps), Mads calls the real API
-directly instead — but exposes it through the exact same `ToolProvider` interface, so the agent
-can't tell the difference.
 
 ## Safety model
 
@@ -293,14 +442,13 @@ can't tell the difference.
   `delete_files`, `terminate_process`). Each takes a `confirmed: bool` parameter; the first call
   always returns `requires_confirmation: true` with no side effect. Gemini surfaces this to you in
   plain conversation, you confirm in your own words, and only then does Gemini re-call with
-  `confirmed=true`. No blocking prompts inside a tool call, no special-cased agent logic — it's
-  just another turn of ordinary function calling.
+  `confirmed=true`.
 - **OAuth tokens are encrypted at rest** under `~/.mads/auth/<provider>.enc` (Fernet, key derived
   from `OAUTH_TOKEN_ENCRYPTION_KEY`), refreshed silently, and never logged or printed.
-- **Adaptive Intelligence never learns automatically.** Every extracted candidate — preference,
-  decision, workflow, constraint, or identity fact — sits in a pending queue until you explicitly
-  approve it. The import pipeline itself is a CLI-only command, not something Gemini can trigger
-  mid-conversation. Approved-fact and pending-queue files are `chmod 0600` and written atomically.
+- **Adaptive Intelligence never learns automatically.** Every extracted candidate sits in a pending
+  queue until you explicitly approve it. The import pipeline itself is a CLI-only command, not
+  something Gemini can trigger mid-conversation. Approved-fact and pending-queue files are
+  `chmod 0600` and written atomically.
 - **Raw imported conversations never reach the model at runtime.** They're read once during
   import to produce candidates, then discarded from the active context — only the structured,
   approved Adaptive Profile is ever injected into the system prompt.
@@ -312,19 +460,35 @@ git clone <this-repo>
 cd mads
 cp .env.example .env   # fill in GEMINI_API_KEY at minimum; other integrations are optional
 uv sync
-uv run mads
+uv run mads            # CLI REPL
 ```
 
+To run the web app and backend:
+
+```bash
+uv run uvicorn server.app:app --reload   # backend on :8000
+cd web && npm install && npm run dev      # frontend on :5173
+```
+
+To load the **Chrome extension**: go to `chrome://extensions`, enable Developer Mode, click
+*Load unpacked*, and select the `extension/` folder.
+
+To load the **Excel add-in**: run `node server.js` in `excel-addin/`, then sideload
+`manifest.xml` in Excel via *Insert → Add-ins → My Add-ins → Upload My Add-in*.
+
 See `.env.example` for every integration's required variables — each one is optional except
-`GEMINI_API_KEY`; Mads simply shows `✗` in its startup banner for anything unconfigured and skips
-it. GitHub also needs its Go binary built once (`go install
-github.com/github/github-mcp-server/cmd/github-mcp-server@latest`), and Google
-Workspace/Spotify need one-time browser OAuth consent on first use.
+`GEMINI_API_KEY`. GitHub also needs its Go binary built once:
+
+```bash
+go install github.com/github/github-mcp-server/cmd/github-mcp-server@latest
+```
+
+Google Workspace and Spotify need one-time browser OAuth consent on first use.
 
 Once running, launch it from inside a project folder and Mads will offer to register it
-automatically — see [Advanced Planner](#advanced-planner). To import ChatGPT history, run `import
-chatgpt <path-to-export-folder>` from the REPL — see [Adaptive
-Intelligence](#adaptive-intelligence).
+automatically — see [Advanced Planner](#advanced-planner). To import ChatGPT history, run
+`import chatgpt <path-to-export-folder>` from the REPL — see
+[Adaptive Intelligence](#adaptive-intelligence).
 
 ## Project layout
 
@@ -334,12 +498,24 @@ mads/
 ├── auth/                     # Shared OAuthManager + per-provider adapters (Google, Spotify)
 ├── cli/                      # REPL entrypoint — session assembly, startup flow, commands
 ├── config/                   # Typed Settings, loaded once from environment
+├── extension/                # Chrome/Edge Manifest v3 extension (side panel + content script)
+│   ├── manifest.json
+│   ├── background.js         # Service worker — chrome.tabs/scripting, navigation
+│   ├── content.js            # Injected into tabs — DOM extraction, click/type/scroll
+│   └── sidepanel.js          # Side panel — WebSocket bridge + chat UI
+├── excel-addin/              # Microsoft Office Excel task pane add-in
+│   ├── manifest.xml          # Office.js add-in manifest
+│   ├── taskpane.js           # Task pane — Excel.run() actions + WebSocket bridge + chat UI
+│   └── server.js             # Dev HTTPS server for sideloading
 ├── mcp_servers/
 │   ├── manager.py            # ToolProvider protocol + MCPManager
-│   └── servers/               # One module/subpackage per capability
+│   └── servers/              # One module/subpackage per capability
 ├── memory/                   # SQLite-backed memory engine + static profile
 ├── planner/                  # Advanced Planner: projects, tasks, prompts, planning, dashboard
 ├── adaptive/                 # Adaptive Intelligence: ChatGPT import pipeline + approval queue
+├── skills/                   # On-demand skill system: PDF, Excel, Docs, PPTX
+├── server/                   # FastAPI backend: SSE chat, WebSocket bridges, file upload/serve
+├── web/                      # React + Vite chat web app
 └── pyproject.toml
 ```
 
@@ -350,17 +526,17 @@ Everything Mads persists lives under `~/.mads/`:
 ```
 ~/.mads/
 ├── memory.sqlite3            # Direct memory: preference/project/decision/person/identity
-├── active_project             # Pointer to the currently active project slug
-├── auth/*.enc                 # Fernet-encrypted OAuth tokens
-├── prompts/global/*.md        # Global prompt library
+├── active_project            # Pointer to the currently active project slug
+├── auth/*.enc                # Fernet-encrypted OAuth tokens
+├── prompts/global/*.md       # Global prompt library
 ├── projects/<slug>/
-│   ├── project.json           # Name, GitHub repo, folder, drive folder
-│   ├── tasks.json              # Project-scoped tasks
-│   └── prompts/*.md            # Project-scoped prompts
+│   ├── project.json          # Name, GitHub repo, folder, drive folder
+│   ├── tasks.json            # Project-scoped tasks
+│   └── prompts/*.md          # Project-scoped prompts
 └── adaptive/
-    ├── pending.json            # Candidates awaiting approval
-    ├── profile.json             # Approved facts — the only thing the model ever sees
-    └── ledger.json               # Import bookkeeping (id + content hash) for incremental imports
+    ├── pending.json          # Candidates awaiting approval
+    ├── profile.json          # Approved facts — the only thing the model ever sees
+    └── ledger.json           # Import bookkeeping (id + content hash) for incremental imports
 ```
 
 Note: Please add your personal information to `memory/profile.md`. This will help Mads

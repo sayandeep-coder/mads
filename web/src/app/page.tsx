@@ -1,20 +1,35 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChatInput } from "@/components/ChatInput";
 import { Message } from "@/components/Message";
+import { PreviewPane } from "@/components/PreviewPane";
+import { SplitLayout } from "@/components/SplitLayout";
 import { StatusBar } from "@/components/StatusBar";
 import { useChat } from "@/lib/useChat";
+import type { GeneratedFile, PreviewTarget } from "@/lib/types";
 
 export default function Home() {
-  const { messages, sendMessage, isStreaming, error, newChat } = useChat();
+  const { messages, sendMessage, isStreaming, error, newChat, stop } = useChat();
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [preview, setPreview] = useState<PreviewTarget>(null);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    // "smooth" scrolling here is the wrong tool during active streaming:
+    // messages (and, via the typewriter in Message.tsx, each message's own
+    // revealed text) can change many times a second while a reply comes
+    // in, and each change re-triggers this effect — stacking that many
+    // concurrent smooth-scroll animations is exactly the kind of
+    // compositor-thread pileup that can crash a tab's renderer outright.
+    // A plain instant jump costs nothing per call and still keeps the
+    // latest content in view.
+    bottomRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [messages]);
 
-  return (
+  const openPreview = (file: GeneratedFile) => setPreview(file);
+  const closePreview = () => setPreview(null);
+
+  const chat = (
     <div className="flex h-full flex-col overflow-hidden">
       <StatusBar onNewChat={newChat} />
 
@@ -24,7 +39,7 @@ export default function Home() {
         ) : (
           <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-6 px-4 py-6 sm:px-6">
             {messages.map((m) => (
-              <Message key={m.id} message={m} />
+              <Message key={m.id} message={m} onOpenFile={openPreview} />
             ))}
             {error && (
               <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-[13px] text-danger">
@@ -36,8 +51,15 @@ export default function Home() {
         )}
       </main>
 
-      {messages.length > 0 && <ChatInput onSend={sendMessage} disabled={isStreaming} />}
+      {messages.length > 0 && <ChatInput onSend={sendMessage} disabled={isStreaming} onStop={stop} />}
     </div>
+  );
+
+  return (
+    <SplitLayout
+      left={chat}
+      right={preview ? <PreviewPane file={preview} onClose={closePreview} /> : null}
+    />
   );
 }
 
@@ -45,7 +67,7 @@ function EmptyState({
   onSend,
   disabled,
 }: {
-  onSend: (prompt: string) => void;
+  onSend: (prompt: string, file?: File) => void;
   disabled: boolean;
 }) {
   return (
