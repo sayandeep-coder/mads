@@ -1,14 +1,52 @@
 @import "tailwindcss";
 
+/* Matches the Gemini web app's dark palette (colors/sizes measured off its
+   actual rendering) using this app's own system-font stack — Gemini's own
+   fonts (Google Sans, its private Material icon font) aren't available to
+   pull in, so sizes/weights/spacing are matched instead of the exact
+   glyphs. :root[data-theme="light"] below is a separate light palette for
+   anyone who wants it. */
 :root {
+  --bg: #131314;
+  --surface: #1e1f20;
+  --surface-raised: #282a2c;
+  --text: #e3e3e3;
+  --text-muted: #9aa0a6;
+  --text-faint: #80868b;
+  --accent: #8ab4f8;
+  --accent-hover: #aecbfa;
+  --accent-text: #062e6f;
+  --border: #3c4043;
+  --border-strong: #5f6368;
+  --user-bubble: #282a2c;
+  --code-bg: #1e1f20;
+  --danger: #f28b82;
+
+  --sidebar: #131314;
+  --sidebar-hover: #282a2c;
+  --sidebar-active: color-mix(in srgb, #8ab4f8 20%, #131314);
+  --sidebar-border: #3c4043;
+  --sidebar-input: #1e1f20;
+  --sidebar-text: #e3e3e3;
+  --sidebar-text-muted: #9aa0a6;
+  --sidebar-text-faint: #80868b;
+
+  --font-sans:
+    var(--font-poppins), -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial,
+    sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+}
+
+:root[data-theme="light"] {
   --bg: #faf9f5;
   --surface: #ffffff;
   --surface-raised: #ffffff;
   --text: #3d3d3a;
   --text-muted: #87867f;
   --text-faint: #b3b2ab;
-  --accent: #d97757;
-  --accent-hover: #c86a4c;
+  --accent: #2f6fed;
+  --accent-hover: #255cc9;
   --accent-text: #ffffff;
   --border: #e8e6dc;
   --border-strong: #d8d6ca;
@@ -16,46 +54,14 @@
   --code-bg: #f0eee5;
   --danger: #c0574a;
 
-  --font-sans:
-    -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  --font-mono:
-    ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
-}
-
-:root[data-theme="dark"] {
-  --bg: #262624;
-  --surface: #30302e;
-  --surface-raised: #383836;
-  --text: #f0eee5;
-  --text-muted: #a8a6a0;
-  --text-faint: #6f6e69;
-  --accent: #d97757;
-  --accent-hover: #e08b6c;
-  --accent-text: #262624;
-  --border: #3d3d3a;
-  --border-strong: #4a4a47;
-  --user-bubble: #383836;
-  --code-bg: #1f1f1d;
-  --danger: #e0847a;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #262624;
-    --surface: #30302e;
-    --surface-raised: #383836;
-    --text: #f0eee5;
-    --text-muted: #a8a6a0;
-    --text-faint: #6f6e69;
-    --accent: #d97757;
-    --accent-hover: #e08b6c;
-    --accent-text: #262624;
-    --border: #3d3d3a;
-    --border-strong: #4a4a47;
-    --user-bubble: #383836;
-    --code-bg: #1f1f1d;
-    --danger: #e0847a;
-  }
+  --sidebar: #faf9f5;
+  --sidebar-hover: #efede4;
+  --sidebar-active: #e8e6dc;
+  --sidebar-border: #e8e6dc;
+  --sidebar-input: #f0eee5;
+  --sidebar-text: #3d3d3a;
+  --sidebar-text-muted: #87867f;
+  --sidebar-text-faint: #b3b2ab;
 }
 
 @theme inline {
@@ -73,6 +79,14 @@
   --color-user-bubble: var(--user-bubble);
   --color-code-bg: var(--code-bg);
   --color-danger: var(--danger);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-hover: var(--sidebar-hover);
+  --color-sidebar-active: var(--sidebar-active);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-input: var(--sidebar-input);
+  --color-sidebar-text: var(--sidebar-text);
+  --color-sidebar-text-muted: var(--sidebar-text-muted);
+  --color-sidebar-text-faint: var(--sidebar-text-faint);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
 }
@@ -87,6 +101,14 @@ body {
   width: 100%;
   overflow: hidden;
   overscroll-behavior: none;
+  /* Mobile Safari silently boosts font-size on narrow viewports it judges
+     "too small to read" (WebKit's automatic text-size inflation) —
+     overriding every explicit px value we set regardless of what it is.
+     This is almost certainly why sidebar text kept rendering far larger
+     than the CSS said on a phone-width screen; disabling it makes our
+     actual font sizes the ones that render. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
@@ -99,11 +121,18 @@ body {
   touch-action: manipulation;
 }
 
+/* font-family only, not the `font` shorthand — that resets font-size too,
+   and because this rule lives outside any @layer it silently outranks
+   every Tailwind text-size-* utility (text-[13px] etc.) applied directly
+   to a button/input/textarea/select, regardless of specificity or source
+   order, since unlayered CSS always beats @layer CSS. That was the actual
+   reason every sidebar/button font-size change kept rendering at the
+   browser default (16px) no matter what value was set. */
 button,
 textarea,
 input,
 select {
-  font: inherit;
+  font-family: inherit;
   touch-action: manipulation;
 }
 
@@ -116,35 +145,27 @@ select {
   outline-offset: 2px;
 }
 
-.chat-input:focus-visible {
+.chat-input:focus-visible,
+.sidebar-search-input:focus-visible {
   outline: none;
 }
 
 .mads-hero {
   isolation: isolate;
-  background:
-    radial-gradient(ellipse 82% 42% at 50% 2%, #ffffff 0%, rgba(255, 255, 255, 0.9) 34%, transparent 72%),
-    linear-gradient(
-      180deg,
-      #f9fafc 0%,
-      #e8edff 19%,
-      #7897ff 39%,
-      #b978ec 54%,
-      #f066cf 67%,
-      #ff3989 82%,
-      #ff573d 100%
-    );
+  background: var(--bg);
 }
 
 .mads-hero-glow {
   position: absolute;
   inset: 0;
   z-index: -1;
-  background:
-    radial-gradient(ellipse 52% 35% at 8% 88%, rgba(255, 93, 36, 0.95), transparent 72%),
-    radial-gradient(ellipse 48% 38% at 92% 86%, rgba(255, 34, 144, 0.92), transparent 72%),
-    radial-gradient(ellipse 42% 34% at 50% 104%, rgba(255, 54, 35, 0.82), transparent 76%);
-  filter: saturate(1.12);
+  background: radial-gradient(
+    ellipse 75% 60% at 50% 42%,
+    color-mix(in srgb, #1e3a8a 55%, var(--bg)) 0%,
+    color-mix(in srgb, #1e3a8a 28%, var(--bg)) 35%,
+    color-mix(in srgb, #1e3a8a 10%, var(--bg)) 60%,
+    var(--bg) 85%
+  );
 }
 
 /* The chat input signals focus via its own wrapper border
@@ -162,5 +183,27 @@ textarea:focus-visible {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* Blinking cursor shown at the end of an assistant reply while it's still
+   typing out (Message.tsx's useTypewriter) — mirrors the caret Claude
+   shows mid-stream. Inline-block so it sits on the same line as the last
+   revealed word rather than always dropping to a new line. */
+.typing-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: mads-caret-blink 0.8s step-end infinite;
+}
+@keyframes mads-caret-blink {
+  0%, 49% {
+    opacity: 1;
+  }
+  50%, 100% {
+    opacity: 0;
   }
 }

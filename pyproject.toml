@@ -25,6 +25,7 @@ dependencies = [
     "fastapi>=0.139.0",
     "uvicorn[standard]>=0.51.0",
     "sse-starlette>=3.4.5",
+    "pytesseract>=0.3.13",
 ]
 
 [project.scripts]

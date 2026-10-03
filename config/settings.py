@@ -12,6 +12,17 @@ class MissingConfigError(RuntimeError):
     """Raised when a required environment variable is not set."""
 
 
+# Scratch workspace for run_command's throwaway helper scripts — shared
+# between agent.agent (where the subprocess actually runs) and
+# agent.system_prompt (which tells the model this exact path to use).
+# Deliberately under the home directory, not inside any project's source
+# tree: the web backend runs under `uvicorn --reload`, which watches the
+# active project for file changes, and a scratch script written straight
+# into a project gets picked up by that watcher and restarts the server
+# mid-request.
+SCRATCH_DIR = Path.home() / ".mads" / "scratch"
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     """Typed application configuration, loaded once from the environment."""
