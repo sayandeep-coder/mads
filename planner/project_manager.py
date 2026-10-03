@@ -7,10 +7,14 @@ from pathlib import Path
 
 from planner.models import Project
 from planner import storage
-from planner.storage import JsonRecordStore, project_dir
+from server.db.connection import get_connection
 
 
 def _active_pointer_path() -> Path:
+    # Which project is "active" is per-machine session state (like a
+    # shell's $PWD or kubectl's current-context) — not data to share
+    # across machines, so this one stays a local file even though the
+    # project registry itself now lives in Postgres.
     return storage.MADS_HOME / "active_project"
 
 # Presence of any of these at a directory's root marks it as a real software
@@ -48,18 +52,28 @@ def _slugify(name: str) -> str:
     return slug
 
 
-def _record_store(slug: str) -> JsonRecordStore[Project]:
-    return JsonRecordStore(project_dir(slug) / "project.json", Project)
+def _row_to_project(row: dict) -> Project:
+    return Project(
+        slug=row["slug"],
+        name=row["name"],
+        github_repo=row["github_repo"],
+        folder=row["folder"],
+        drive_folder=row["drive_folder"],
+        tags=row["tags"] or [],
+        created_at=row["created_at"],
+        last_active_at=row["last_active_at"],
+    )
 
 
 class ProjectManager:
     """Registry of known workspaces, plus workspace discovery.
 
     Discovery is the primary path (find_workspace_root / detect_github_repo,
-    used at startup to auto-detect and offer to register unseen projects);
+    used at startup to auto-detect and offer to register unseen workspaces);
     the registry (create/get/list/set_active) is what makes a discovered
-    workspace durable across sessions. Neither is meant to be used without
-    the other — see planner.planner.Planner for the orchestration.
+    workspace durable across sessions — backed by the `projects` table.
+    Neither is meant to be used without the other — see
+    planner.planner.Planner for the orchestration.
     """
 
     # -- registry --------------------------------------------------------
@@ -73,43 +87,40 @@ class ProjectManager:
         tags: list[str] | None = None,
     ) -> Project:
         slug = _slugify(name)
-        store = _record_store(slug)
-        if store.exists():
-            raise ProjectAlreadyExistsError(f"Project {name!r} already exists")
+        now = datetime.now(timezone.utc)
 
-        project = Project(
-            slug=slug,
-            name=name,
-            github_repo=github_repo or None,
-            folder=folder or None,
-            drive_folder=drive_folder or None,
-            tags=tags or [],
-            created_at=datetime.now(timezone.utc),
-            last_active_at=None,
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM projects WHERE slug = %s", (slug,))
+            if cur.fetchone() is not None:
+                raise ProjectAlreadyExistsError(f"Project {name!r} already exists")
+
+            cur.execute(
+                """
+                INSERT INTO projects (slug, name, github_repo, folder, drive_folder, tags, created_at, last_active_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NULL)
+                """,
+                (slug, name, github_repo or None, folder or None, drive_folder or None, tags or [], now),
+            )
+
+        return Project(
+            slug=slug, name=name, github_repo=github_repo or None, folder=folder or None,
+            drive_folder=drive_folder or None, tags=tags or [], created_at=now, last_active_at=None,
         )
-        store.write(project)
-
-        tasks_path = project_dir(slug) / "tasks.json"
-        if not tasks_path.exists():
-            tasks_path.write_text("[]", encoding="utf-8")
-
-        return project
 
     def get(self, name_or_slug: str) -> Project:
         slug = _slugify(name_or_slug)
-        project = _record_store(slug).read()
-        if project is None:
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT * FROM projects WHERE slug = %s", (slug,))
+            row = cur.fetchone()
+        if row is None:
             raise ProjectNotFoundError(f"No project named {name_or_slug!r}")
-        return project
+        return _row_to_project(row)
 
     def list_all(self) -> list[Project]:
-        projects_root = storage.projects_root()
-        if not projects_root.exists():
-            return []
-        projects = []
-        for path in sorted(projects_root.glob("*/project.json")):
-            projects.append(Project.model_validate_json(path.read_text(encoding="utf-8")))
-        return projects
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT * FROM projects ORDER BY slug")
+            rows = cur.fetchall()
+        return [_row_to_project(row) for row in rows]
 
     def find_by_folder(self, folder: Path) -> Project | None:
         """Return the registered project whose folder exactly matches, if any."""
@@ -121,10 +132,11 @@ class ProjectManager:
 
     def touch(self, slug: str) -> Project:
         """Update a project's last_active_at to now."""
-        project = self.get(slug)
-        updated = project.model_copy(update={"last_active_at": datetime.now(timezone.utc)})
-        _record_store(project.slug).write(updated)
-        return updated
+        project = self.get(slug)  # validates existence
+        now = datetime.now(timezone.utc)
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE projects SET last_active_at = %s WHERE slug = %s", (now, project.slug))
+        return project.model_copy(update={"last_active_at": now})
 
     def set_active(self, slug: str) -> Project:
         """Mark a project active: writes the pointer file and bumps last_active_at."""

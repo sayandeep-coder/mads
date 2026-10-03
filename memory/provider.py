@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class MemoryProvider:
     """Local, persistent memory: preferences, projects, decisions, people.
 
-    Backed by SQLite in ~/.mads/memory.sqlite3 — no external service, no
+    Backed by Postgres (the `memories` table) — no external service, no
     vector DB. remember()/forget()/update_memory()/search_memory() are
     exposed as ordinary tools; Gemini decides when something is worth
     remembering, same as it decides when to call any other tool.

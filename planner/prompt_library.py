@@ -2,13 +2,9 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 
-from planner import storage
 from planner.models import Prompt, PromptScope
-from planner.storage import project_dir
-
-_FRONTMATTER_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.DOTALL)
+from server.db.connection import get_connection
 
 
 class PromptNotFoundError(ValueError):
@@ -22,73 +18,26 @@ def _slugify(title: str) -> str:
     return slug
 
 
-def _global_prompts_dir() -> Path:
-    return storage.MADS_HOME / "prompts" / "global"
-
-
-def _project_prompts_dir(project_slug: str) -> Path:
-    return project_dir(project_slug) / "prompts"
-
-
-def _prompts_dir(scope: PromptScope, project_slug: str | None) -> Path:
-    if scope == PromptScope.GLOBAL:
-        return _global_prompts_dir()
-    if not project_slug:
-        raise ValueError("project_slug is required for project-scoped prompts")
-    return _project_prompts_dir(project_slug)
-
-
-def _format_frontmatter(prompt: Prompt) -> str:
-    lines = [
-        "---",
-        f"title: {prompt.title}",
-        f"description: {prompt.description}",
-        f"category: {prompt.category}",
-        f"tags: {', '.join(prompt.tags)}",
-        f"favorite: {str(prompt.favorite).lower()}",
-        f"created: {prompt.created_at.isoformat()}",
-        f"updated: {prompt.updated_at.isoformat()}",
-        "---",
-        "",
-    ]
-    return "\n".join(lines) + prompt.body
-
-
-def _parse_prompt_file(path: Path, scope: PromptScope, project_slug: str | None) -> Prompt:
-    text = path.read_text(encoding="utf-8")
-    match = _FRONTMATTER_PATTERN.match(text)
-    if not match:
-        raise ValueError(f"Prompt file {path} is missing a frontmatter block")
-
-    raw_frontmatter, body = match.group(1), match.group(2)
-    fields: dict[str, str] = {}
-    for line in raw_frontmatter.splitlines():
-        if ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        fields[key.strip()] = value.strip()
-
-    tags = [t.strip() for t in fields.get("tags", "").split(",") if t.strip()]
-
+def _row_to_prompt(row: dict) -> Prompt:
     return Prompt(
-        slug=path.stem,
-        title=fields.get("title", path.stem),
-        description=fields.get("description", ""),
-        category=fields.get("category", "general"),
-        body=body.strip("\n"),
-        tags=tags,
-        scope=scope,
-        project_slug=project_slug,
-        favorite=fields.get("favorite", "false").lower() == "true",
-        created_at=datetime.fromisoformat(fields["created"]) if "created" in fields else datetime.now(timezone.utc),
-        updated_at=datetime.fromisoformat(fields["updated"]) if "updated" in fields else datetime.now(timezone.utc),
+        slug=row["slug"],
+        title=row["title"],
+        description=row["description"],
+        category=row["category"],
+        body=row["body"],
+        tags=row["tags"] or [],
+        scope=PromptScope(row["scope"]),
+        project_slug=row["project_slug"],
+        favorite=row["favorite"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 
 class PromptLibrary:
-    """Reusable prompt assets, global or project-scoped, stored as markdown
-    files with a YAML-like frontmatter block — designed to be readable and
-    hand-editable, not just machine-managed.
+    """Reusable prompt assets, global or project-scoped — backed by the
+    `prompts` table (slug is unique per scope, not globally; see
+    schema.sql's prompts_scope_unique index).
     """
 
     def create(
@@ -101,29 +50,34 @@ class PromptLibrary:
         category: str = "general",
         tags: list[str] | None = None,
     ) -> Prompt:
-        slug = _slugify(title)
-        directory = _prompts_dir(scope, project_slug)
-        path = directory / f"{slug}.md"
-        if path.exists():
-            raise FileExistsError(f"Prompt {title!r} already exists in this scope")
+        if scope == PromptScope.PROJECT and not project_slug:
+            raise ValueError("project_slug is required for project-scoped prompts")
 
+        slug = _slugify(title)
         now = datetime.now(timezone.utc)
-        prompt = Prompt(
-            slug=slug,
-            title=title,
-            description=description,
-            category=category,
-            body=body,
-            tags=tags or [],
-            scope=scope,
-            project_slug=project_slug,
-            favorite=False,
-            created_at=now,
-            updated_at=now,
+
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM prompts WHERE slug = %s AND scope = %s AND COALESCE(project_slug, '') = %s",
+                (slug, scope.value, project_slug or ""),
+            )
+            if cur.fetchone() is not None:
+                raise FileExistsError(f"Prompt {title!r} already exists in this scope")
+
+            cur.execute(
+                """
+                INSERT INTO prompts (slug, title, description, category, body, tags, scope,
+                                      project_slug, favorite, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE, %s, %s)
+                """,
+                (slug, title, description, category, body, tags or [], scope.value, project_slug, now, now),
+            )
+
+        return Prompt(
+            slug=slug, title=title, description=description, category=category, body=body,
+            tags=tags or [], scope=scope, project_slug=project_slug, favorite=False,
+            created_at=now, updated_at=now,
         )
-        directory.mkdir(parents=True, exist_ok=True)
-        path.write_text(_format_frontmatter(prompt), encoding="utf-8")
-        return prompt
 
     def list_all(
         self,
@@ -132,24 +86,21 @@ class PromptLibrary:
         favorites_only: bool = False,
     ) -> list[Prompt]:
         """List global prompts plus, if project_slug is given, that project's prompts too."""
-        prompts: list[Prompt] = []
+        with get_connection() as conn, conn.cursor() as cur:
+            if project_slug:
+                cur.execute(
+                    "SELECT * FROM prompts WHERE scope = 'global' OR project_slug = %s ORDER BY slug",
+                    (project_slug,),
+                )
+            else:
+                cur.execute("SELECT * FROM prompts WHERE scope = 'global' ORDER BY slug")
+            rows = cur.fetchall()
 
-        global_dir = _global_prompts_dir()
-        if global_dir.exists():
-            for path in sorted(global_dir.glob("*.md")):
-                prompts.append(_parse_prompt_file(path, PromptScope.GLOBAL, None))
-
-        if project_slug:
-            project_dir_path = _project_prompts_dir(project_slug)
-            if project_dir_path.exists():
-                for path in sorted(project_dir_path.glob("*.md")):
-                    prompts.append(_parse_prompt_file(path, PromptScope.PROJECT, project_slug))
-
+        prompts = [_row_to_prompt(row) for row in rows]
         if category is not None:
             prompts = [p for p in prompts if p.category == category]
         if favorites_only:
             prompts = [p for p in prompts if p.favorite]
-
         return prompts
 
     def get(
@@ -158,10 +109,15 @@ class PromptLibrary:
         scope: PromptScope = PromptScope.GLOBAL,
         project_slug: str | None = None,
     ) -> Prompt:
-        path = _prompts_dir(scope, project_slug) / f"{slug}.md"
-        if not path.exists():
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM prompts WHERE slug = %s AND scope = %s AND COALESCE(project_slug, '') = %s",
+                (slug, scope.value, project_slug or ""),
+            )
+            row = cur.fetchone()
+        if row is None:
             raise PromptNotFoundError(f"No prompt {slug!r} in scope {scope.value}")
-        return _parse_prompt_file(path, scope, project_slug)
+        return _row_to_prompt(row)
 
     def use(
         self,
@@ -185,7 +141,7 @@ class PromptLibrary:
         category: str | None = None,
         tags: list[str] | None = None,
     ) -> Prompt:
-        existing = self.get(slug, scope, project_slug)
+        existing = self.get(slug, scope, project_slug)  # raises PromptNotFoundError if missing
         updated = existing.model_copy(
             update={
                 "title": title if title is not None else existing.title,
@@ -196,8 +152,16 @@ class PromptLibrary:
                 "updated_at": datetime.now(timezone.utc),
             }
         )
-        path = _prompts_dir(scope, project_slug) / f"{slug}.md"
-        path.write_text(_format_frontmatter(updated), encoding="utf-8")
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE prompts SET title = %s, body = %s, description = %s, category = %s,
+                                    tags = %s, updated_at = %s
+                WHERE slug = %s AND scope = %s AND COALESCE(project_slug, '') = %s
+                """,
+                (updated.title, updated.body, updated.description, updated.category, updated.tags,
+                 updated.updated_at, slug, scope.value, project_slug or ""),
+            )
         return updated
 
     def delete(
@@ -206,11 +170,12 @@ class PromptLibrary:
         scope: PromptScope = PromptScope.GLOBAL,
         project_slug: str | None = None,
     ) -> bool:
-        path = _prompts_dir(scope, project_slug) / f"{slug}.md"
-        if not path.exists():
-            return False
-        path.unlink()
-        return True
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM prompts WHERE slug = %s AND scope = %s AND COALESCE(project_slug, '') = %s",
+                (slug, scope.value, project_slug or ""),
+            )
+            return cur.rowcount > 0
 
     def favorite(
         self,
@@ -219,8 +184,14 @@ class PromptLibrary:
         project_slug: str | None = None,
         favorite: bool = True,
     ) -> Prompt:
-        existing = self.get(slug, scope, project_slug)
-        updated = existing.model_copy(update={"favorite": favorite, "updated_at": datetime.now(timezone.utc)})
-        path = _prompts_dir(scope, project_slug) / f"{slug}.md"
-        path.write_text(_format_frontmatter(updated), encoding="utf-8")
-        return updated
+        existing = self.get(slug, scope, project_slug)  # raises PromptNotFoundError if missing
+        now = datetime.now(timezone.utc)
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE prompts SET favorite = %s, updated_at = %s
+                WHERE slug = %s AND scope = %s AND COALESCE(project_slug, '') = %s
+                """,
+                (favorite, now, slug, scope.value, project_slug or ""),
+            )
+        return existing.model_copy(update={"favorite": favorite, "updated_at": now})
