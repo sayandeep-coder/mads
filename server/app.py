@@ -16,10 +16,21 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from adaptive.profile import AdaptiveProfile
-from agent.session import Session, build_browser_session, build_excel_session, build_session, resolve_startup_project
+from agent.agent import Agent
+from agent.session import (
+    Session,
+    build_agent_for_session,
+    build_browser_session,
+    build_excel_session,
+    build_session,
+    resolve_startup_project,
+)
+from agent.system_prompt import apply_mode
 from config.settings import get_settings
 from planner.planner import Planner
 from server.browser_bridge import browser_bridge, excel_bridge
+from server.code_runner import handle_code_run
+from server.store import chat_store
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +78,12 @@ async def lifespan(app: FastAPI):
     _state["session"] = session
     _state["browser_session"] = browser_session
     _state["excel_session"] = excel_session
+    # One live Agent per stored chat conversation (session_id -> Agent),
+    # all sharing `session`'s already-connected MCP tools — see
+    # _get_chat_agent. Built lazily on first message, not for every row
+    # ChatStore knows about, so having years of chat history sitting in
+    # SQLite costs nothing until a given conversation is actually reopened.
+    _state["chat_agents"] = {}
 
     logger.info("Mads web server ready — connected: %s", session.mcp_manager.connected_servers)
 
@@ -98,6 +115,46 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: str | None = None
+    # "study" | "research" | None — the web UI's "+" menu toggle; see
+    # agent.system_prompt.apply_mode for what each one actually does.
+    mode: str | None = None
+
+
+class RenameRequest(BaseModel):
+    title: str
+
+
+def _derive_title(message: str) -> str:
+    """First line of the opening message, trimmed to a sidebar-friendly
+    length — same idea as Claude Code titling a session from its first
+    prompt rather than asking the user to name it upfront.
+    """
+    first_line = message.strip().splitlines()[0] if message.strip() else "New chat"
+    return first_line[:60] + ("…" if len(first_line) > 60 else "")
+
+
+def _get_chat_agent(session_id: str) -> Agent:
+    """Return the live Agent for this stored conversation, building it (and
+    replaying any prior messages as history) on first use.
+    """
+    agents: dict[str, Agent] = _state["chat_agents"]  # type: ignore[assignment]
+    if session_id in agents:
+        return agents[session_id]
+
+    main_session: Session = _state["session"]  # type: ignore[assignment]
+    planner: Planner = _state["planner"]  # type: ignore[assignment]
+    adaptive_profile: AdaptiveProfile = _state["adaptive_profile"]  # type: ignore[assignment]
+
+    agent = build_agent_for_session(main_session, planner, adaptive_profile)
+
+    prior = chat_store.list_messages(session_id)
+    if prior:
+        turns = [("user" if m["role"] == "user" else "model", m["text"]) for m in prior]
+        agent.prime_history(turns)
+
+    agents[session_id] = agent
+    return agent
 
 
 def _event_to_sse_dict(event) -> dict:
@@ -112,6 +169,10 @@ def _event_to_sse_dict(event) -> dict:
         payload["text"] = event.text
     if event.result is not None:
         payload["result"] = event.result
+    if event.call_id is not None:
+        payload["call_id"] = event.call_id
+    if event.output is not None:
+        payload["output"] = event.output
     return payload
 
 
@@ -126,19 +187,88 @@ async def status():
     }
 
 
+@app.get("/api/sessions")
+async def list_sessions():
+    return {"sessions": chat_store.list_sessions()}
+
+
+@app.post("/api/sessions")
+async def create_session():
+    return chat_store.create_session()
+
+
+@app.get("/api/sessions/{session_id}/messages")
+async def get_session_messages(session_id: str):
+    if chat_store.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"messages": chat_store.list_messages(session_id)}
+
+
+@app.patch("/api/sessions/{session_id}")
+async def rename_session(session_id: str, request: RenameRequest):
+    if chat_store.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    chat_store.rename_session(session_id, request.title.strip()[:60] or "New chat")
+    return {"ok": True}
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    chat_store.delete_session(session_id)
+    agents: dict[str, Agent] = _state["chat_agents"]  # type: ignore[assignment]
+    agents.pop(session_id, None)
+    return {"ok": True}
+
+
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
     """Stream tool-call activity and the final reply as Server-Sent Events.
 
     Event shape matches agent.agent.AgentEvent: tool_call_started ->
     tool_call_finished (possibly several, concurrent) -> final_response.
+    Every call belongs to a stored conversation (session_id): a brand new
+    one is created automatically if the caller doesn't have one yet, and
+    the exchange is persisted to ChatStore as it completes so the sidebar
+    and history survive a server restart.
     """
-    session: Session = _state["session"]  # type: ignore[assignment]
     planner: Planner = _state["planner"]  # type: ignore[assignment]
 
+    session_id = request.session_id
+    is_new_session = session_id is None or chat_store.get_session(session_id) is None
+    if is_new_session:
+        created = chat_store.create_session(_derive_title(request.message))
+        session_id = created["id"]
+
+    agent = _get_chat_agent(session_id)
+    # Stored/shown to the user as-is; the model only ever sees the
+    # mode-prefixed version below, so history replay never re-injects a
+    # mode instruction into a turn that didn't actually have one active.
+    chat_store.add_message(session_id, "user", request.message)
+    message_for_model = apply_mode(request.message, request.mode)
+
     async def event_generator():
-        async for event in session.agent.stream(request.message):
+        full_text = ""
+        tool_calls: list[dict] = []
+        files: list[dict] = []
+
+        if is_new_session:
+            yield {"event": "message", "data": json.dumps({"type": "session_created", "session_id": session_id})}
+
+        async for event in agent.stream(message_for_model):
+            if event.type == "tool_call_started":
+                tool_calls.append({"name": event.tool_name, "args": event.tool_args})
+            elif event.type == "tool_call_finished":
+                result = event.result or {}
+                path = result.get("path")
+                if not event.is_error and isinstance(path, str) and path:
+                    files.append({"path": path, "name": path.split("/")[-1]})
+            elif event.type == "text_delta":
+                full_text += event.text or ""
+            elif event.type == "final_response":
+                full_text = full_text or event.text or ""
             yield {"event": "message", "data": json.dumps(_event_to_sse_dict(event))}
+
+        chat_store.add_message(session_id, "model", full_text, tool_calls=tool_calls, files=files)
         planner.record_action(request.message[:120])
 
     return EventSourceResponse(event_generator())
@@ -193,6 +323,16 @@ async def excel_socket(websocket: WebSocket):
     the same WebSocketCommandBridge the Chrome extension uses).
     """
     await excel_bridge.handle_connection(websocket)
+
+
+@app.websocket("/ws/run")
+async def run_socket(websocket: WebSocket):
+    """Backs the web UI's "Run" button on a code block in a chat message —
+    a user-triggered, interactive run (full stdin/stdout), completely
+    separate from the agent's own run_command tool. See
+    server.code_runner.handle_code_run for the actual protocol.
+    """
+    await handle_code_run(websocket)
 
 
 @app.get("/api/excel/status")

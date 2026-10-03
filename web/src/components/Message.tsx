@@ -20,6 +20,21 @@ const MS_PER_CHAR = 20;
 // letter anyway.
 const MAX_ANIMATED_LENGTH = 600;
 
+// Mirrors server/code_runner.py's _LANGUAGE_RUNNERS keys — a code block
+// only gets a Run button if the backend actually knows how to execute it.
+const RUNNABLE_LANGUAGES = new Set([
+  "python",
+  "py",
+  "javascript",
+  "js",
+  "node",
+  "typescript",
+  "ts",
+  "bash",
+  "sh",
+  "shell",
+]);
+
 /**
  * Reveals `fullText` one character at a time, independent of how large the
  * chunks were that actually arrived over the network (Gemini streams whole
@@ -85,9 +100,11 @@ function useTypewriter(fullText: string, enabled: boolean): string {
 export function Message({
   message,
   onOpenFile,
+  onRunCode,
 }: {
   message: ChatMessage;
   onOpenFile?: (file: GeneratedFile) => void;
+  onRunCode?: (language: string, code: string) => void;
 }) {
   // Only animate while the reply is actually still streaming in — once a
   // turn is done (or for a re-rendered message from earlier in the
@@ -98,7 +115,7 @@ export function Message({
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-2xl bg-user-bubble px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap">
+        <div className="max-w-[85%] rounded-2xl bg-user-bubble px-4 py-2.5 text-[15px] leading-6 whitespace-pre-wrap">
           {message.text}
         </div>
       </div>
@@ -126,8 +143,8 @@ export function Message({
         <TypingIndicator />
       ) : (
         displayedText && (
-          <div className="max-w-[75ch] text-[15px] leading-relaxed text-text">
-            <MarkdownText text={displayedText} />
+          <div className="max-w-[75ch] text-[15px] leading-6 text-text">
+            <MarkdownText text={displayedText} onRunCode={onRunCode} />
             {isTyping && <span className="typing-caret" aria-hidden="true" />}
           </div>
         )
@@ -144,7 +161,7 @@ export function Message({
   );
 }
 
-function MarkdownText({ text }: { text: string }) {
+function MarkdownText({ text, onRunCode }: { text: string; onRunCode?: (language: string, code: string) => void }) {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   const blocks: ReactNode[] = [];
   let index = 0;
@@ -158,7 +175,7 @@ function MarkdownText({ text }: { text: string }) {
     }
 
     if (line.trim().startsWith("```")) {
-      const language = line.trim().slice(3);
+      const language = line.trim().slice(3).trim().toLowerCase();
       const code: string[] = [];
       index += 1;
       while (index < lines.length && !lines[index].trim().startsWith("```")) {
@@ -166,14 +183,9 @@ function MarkdownText({ text }: { text: string }) {
         index += 1;
       }
       if (index < lines.length) index += 1;
+      const codeText = code.join("\n");
       blocks.push(
-        <pre
-          key={`code-${index}`}
-          className="overflow-x-auto rounded-xl bg-code-bg px-4 py-3 font-mono text-[13px] leading-5"
-          data-language={language || undefined}
-        >
-          <code>{code.join("\n")}</code>
-        </pre>,
+        <CodeBlock key={`code-${index}`} language={language} code={codeText} onRunCode={onRunCode} />,
       );
       continue;
     }
@@ -267,8 +279,14 @@ function isBlockStart(line: string) {
   );
 }
 
+// Trailing punctuation a URL often butts up against in prose ("...watch?v=abc.",
+// "see https://x.com, then...") isn't part of the link — stripped off here and
+// put back as plain text so it doesn't get swallowed into the href.
+const URL_TRAILING_PUNCTUATION = /[.,;:!?]+$/;
+
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
-  const tokenPattern = /(\*\*.+?\*\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^\s)]+\))/g;
+  const tokenPattern =
+    /(\*\*.+?\*\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s)]+)/g;
   const nodes: ReactNode[] = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -286,7 +304,7 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
           {token.slice(1, -1)}
         </code>,
       );
-    } else {
+    } else if (token.startsWith("[")) {
       const link = token.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
       if (link) {
         nodes.push(
@@ -301,12 +319,125 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
           </a>,
         );
       }
+    } else {
+      // A bare URL (no [text](...) wrapper) — e.g. the model just dropped
+      // "https://..." straight into its reply instead of markdown-linking it.
+      const trailingMatch = token.match(URL_TRAILING_PUNCTUATION);
+      const trailing = trailingMatch ? trailingMatch[0] : "";
+      const url = trailing ? token.slice(0, -trailing.length) : token;
+      nodes.push(
+        <a
+          key={key}
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          className="font-medium text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent"
+        >
+          {url}
+        </a>,
+      );
+      if (trailing) nodes.push(trailing);
     }
     lastIndex = match.index + token.length;
   }
 
   if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
   return nodes.map((node, index) => <Fragment key={`${keyPrefix}-part-${index}`}>{node}</Fragment>);
+}
+
+/** A fenced code block with a persistent header (language + copy + Run) —
+ * always visible, never a hover-only affordance that's easy to miss or
+ * clip at the edge of the block. */
+function CodeBlock({
+  language,
+  code,
+  onRunCode,
+}: {
+  language: string;
+  code: string;
+  onRunCode?: (language: string, code: string) => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const runnable = onRunCode && RUNNABLE_LANGUAGES.has(language);
+  const displayLanguage = language ? language.charAt(0).toUpperCase() + language.slice(1) : "Code";
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard access can be denied/unavailable — not worth surfacing.
+    }
+  };
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-code-bg">
+      <div className="flex items-center justify-between gap-2 border-b border-border px-3.5 py-2">
+        <span className="flex items-center gap-1.5 text-[12.5px] font-medium text-text-muted">
+          <CodeIcon />
+          {displayLanguage}
+        </span>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={copy}
+            aria-label="Copy code"
+            title="Copy"
+            className="flex h-7 w-7 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-user-bubble hover:text-text"
+          >
+            {copied ? <CheckIcon /> : <CopyIcon />}
+          </button>
+          {runnable && (
+            <button
+              type="button"
+              onClick={() => onRunCode(language, code)}
+              className="flex items-center gap-1.5 rounded-full border border-border-strong px-3 py-1 text-[12.5px] font-medium text-text transition-colors hover:bg-user-bubble"
+            >
+              <RunIcon />
+              Run
+            </button>
+          )}
+        </div>
+      </div>
+      <pre className="overflow-x-auto px-4 py-3 font-mono text-[13px] leading-5">
+        <code>{code}</code>
+      </pre>
+    </div>
+  );
+}
+
+function CodeIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
+      <path d="M5.5 4L2 8l3.5 4M10.5 4L14 8l-3.5 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
+      <rect x="5.5" y="5.5" width="8" height="8" rx="1.3" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M3.5 10.5h-1a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v1" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
+      <path d="M3.5 8.5l2.5 2.5L12.5 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function RunIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="11" height="11" fill="none">
+      <path d="M5 3.5l7 4.5-7 4.5Z" fill="currentColor" />
+    </svg>
+  );
 }
 
 function TypingIndicator() {

@@ -141,6 +141,26 @@ async def build_session(
     return Session(settings=settings, mcp_manager=mcp_manager, agent=agent)
 
 
+def build_agent_for_session(session: Session, planner: Planner, adaptive_profile: AdaptiveProfile) -> Agent:
+    """A second (or third, ...) independent Agent sharing `session`'s
+    already-connected mcp_manager — used by the web backend to give each
+    stored chat conversation its own Gemini chat history/loaded-skills
+    state, without reconnecting every MCP subprocess per conversation the
+    way a full build_session() call would.
+    """
+    memory_context = build_recall_summary()
+    project_context = planner.render_system_context()
+    adaptive_context = adaptive_profile.render_context()
+    return Agent(
+        settings=session.settings,
+        mcp_manager=session.mcp_manager,
+        memory_context=memory_context,
+        project_context=project_context,
+        adaptive_context=adaptive_context,
+        skill_registry=build_registry(session.settings),
+    )
+
+
 async def build_browser_session(base_settings: Settings, bridge) -> Session:
     """Build a separate, lightweight session for the Chrome side panel: just
     browser_control (backed by `bridge`, the live extension websocket) plus

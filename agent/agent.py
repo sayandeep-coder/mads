@@ -3,8 +3,11 @@ from __future__ import annotations
 import ast
 import asyncio
 import logging
+import re
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from google import genai
@@ -12,13 +15,19 @@ from google.genai import types as genai_types
 
 from agent.system_prompt import build_system_prompt
 from agent.tools import mcp_tool_to_function_declaration
-from config.settings import Settings
+from config.settings import SCRATCH_DIR, Settings
 from mcp_servers.manager import MCPManager, MCPToolNotFoundError
 from skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
 
 _MAX_TOOL_CALL_ROUNDS = 8
+
+# A run_command script that produces a deliverable file prints this marker
+# as its last line so the result can carry a `path` — see
+# Agent._run_shell_command's MADS_FILE handling.
+_MADS_FILE_PATTERN = re.compile(r"^MADS_FILE:\s*(.+)$", re.MULTILINE)
+
 
 _LOAD_SKILL_TOOL = genai_types.FunctionDeclaration(
     name="load_skill",
@@ -35,6 +44,28 @@ _LOAD_SKILL_TOOL = genai_types.FunctionDeclaration(
             "name": {"type": "string", "description": "The skill's name, exactly as listed in the skill index."},
         },
         "required": ["name"],
+    },
+)
+
+_RUN_COMMAND_TOOL = genai_types.FunctionDeclaration(
+    name="run_command",
+    description=(
+        "Run a shell command on this Mac and get back its combined stdout/stderr and exit code. "
+        "This is your DEFAULT way to build a PDF, PPTX, Excel, or Word file — write a real script "
+        "(reportlab/python-pptx/openpyxl/python-docx or whatever fits), pip install what it needs, "
+        "run it here, and read the real output, instead of reaching for the fixed pdf/pptx/excel/docs "
+        "skills first. Also use it for installing packages, running a script you just wrote, or "
+        "anything else a terminal can do. Output streams to the user live as the command runs, like a "
+        "real terminal, so narrate what you're about to run rather than describing it after the fact. "
+        "Runs in the active project's directory unless cwd is given."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "The shell command to run, exactly as you'd type it in a terminal."},
+            "cwd": {"type": "string", "description": "Optional working directory (absolute path). Defaults to the active project folder."},
+        },
+        "required": ["command"],
     },
 )
 
@@ -68,7 +99,7 @@ class AgentEvent:
     each kind differently; Agent itself doesn't know or care who's listening.
     """
 
-    type: Literal["tool_call_started", "tool_call_finished", "text_delta", "final_response"]
+    type: Literal["tool_call_started", "tool_call_output", "tool_call_finished", "text_delta", "final_response"]
     tool_name: str | None = None
     tool_args: dict[str, Any] | None = None
     is_error: bool | None = None
@@ -77,6 +108,14 @@ class AgentEvent:
     # consumers (the web frontend) notice things like a generated file's
     # path without Agent needing to know what any particular tool means.
     result: dict[str, Any] | None = None
+    # Identifies which call a tool_call_started/_output/_finished event
+    # belongs to — needed once a tool call can emit more than one event
+    # (run_command's live output lines) and more than one call can be in
+    # flight at once, since matching by name+order alone is then ambiguous.
+    call_id: str | None = None
+    # A single chunk of live output, only set on tool_call_output — e.g.
+    # one line from a running shell command.
+    output: str | None = None
 
 
 class Agent:
@@ -100,6 +139,7 @@ class Agent:
     ) -> None:
         self._mcp = mcp_manager
         self._client = genai.Client(api_key=settings.gemini_api_key)
+        self._settings = settings
         self._skills = skill_registry
         # Names of skills whose real tools have been merged into the live
         # tool list this session — see _ensure_skill_loaded. Starts empty
@@ -112,6 +152,12 @@ class Agent:
         ]
         if self._skills is not None and self._skills.all():
             self._base_declarations.append(_LOAD_SKILL_TOOL)
+        # Shell access is a full-fleet capability, deliberately left out of
+        # the browser/Excel side-panel sessions the same way their provider
+        # list already excludes filesystem/system/etc. — see
+        # agent.session.build_browser_session and build_excel_session.
+        if not browser_mode and not excel_mode:
+            self._base_declarations.append(_RUN_COMMAND_TOOL)
 
         self._system_instruction = build_system_prompt(
             memory_context,
@@ -141,6 +187,24 @@ class Agent:
         self._loaded_skills = set()
         self._config = self._build_config(self._base_declarations)
         self._chat = self._client.chats.create(model=self._model, config=self._config)
+
+    def prime_history(self, turns: list[tuple[str, str]]) -> None:
+        """Rebuild the chat with prior user/assistant text turns replayed as
+        history, for resuming a conversation stored in the web backend's
+        ChatStore after the in-memory Agent for it was evicted (e.g. a
+        server restart). Tool calls aren't replayed — only the text each
+        side actually said — which is enough for the model to pick the
+        conversation back up even though it won't "remember" exactly which
+        tools it used to get there.
+        """
+        self._loaded_skills = set()
+        self._config = self._build_config(self._base_declarations)
+        history = [
+            genai_types.Content(role=role, parts=[genai_types.Part(text=text)])
+            for role, text in turns
+            if text
+        ]
+        self._chat = self._client.chats.create(model=self._model, config=self._config, history=history)
 
     async def send(self, message: str) -> str:
         """Send a user message, resolving any tool calls Gemini requests, and return the final reply.
@@ -193,8 +257,14 @@ class Agent:
                 # further tool calls (the round that actually produces the
                 # final answer) ever reaches full_text/text_delta — see
                 # the `else` branch below.
+                call_ids = {id(call): uuid.uuid4().hex for call in function_calls}
                 for call in function_calls:
-                    yield AgentEvent(type="tool_call_started", tool_name=call.name, tool_args=call.args or {})
+                    yield AgentEvent(
+                        type="tool_call_started",
+                        tool_name=call.name,
+                        tool_args=call.args or {},
+                        call_id=call_ids[id(call)],
+                    )
             else:
                 if round_text:
                     full_text += round_text
@@ -206,17 +276,25 @@ class Agent:
             # run concurrently rather than one-by-one — same one-agent
             # architecture, just not needlessly serialized. Events for
             # calls that finish first are yielded first; the client sees
-            # completion order, not request order.
-            queue: asyncio.Queue[tuple[genai_types.FunctionCall, genai_types.Part]] = asyncio.Queue()
+            # completion order, not request order. A tool call that streams
+            # live output (run_command) pushes ("output", call_id, text)
+            # tuples onto this same queue as it runs, ahead of its own
+            # ("result", call, part) tuple — see _execute_function_call.
+            queue: asyncio.Queue[tuple[str, Any, Any]] = asyncio.Queue()
 
             async def _run(call: genai_types.FunctionCall) -> None:
-                part = await self._execute_function_call(call)
-                await queue.put((call, part))
+                part = await self._execute_function_call(call, call_ids[id(call)], queue)
+                await queue.put(("result", call, part))
 
             tasks = [asyncio.create_task(_run(call)) for call in function_calls]
             response_parts: list[genai_types.Part] = []
-            for _ in function_calls:
-                call, part = await queue.get()
+            remaining = len(function_calls)
+            while remaining:
+                kind, a, b = await queue.get()
+                if kind == "output":
+                    yield AgentEvent(type="tool_call_output", call_id=a, output=b)
+                    continue
+                call, part = a, b
                 response_payload = part.function_response.response or {}
                 is_error = "error" in response_payload
                 yield AgentEvent(
@@ -224,8 +302,10 @@ class Agent:
                     tool_name=call.name,
                     is_error=is_error,
                     result=_parse_tool_output(response_payload),
+                    call_id=call_ids[id(call)],
                 )
                 response_parts.append(part)
+                remaining -= 1
             await asyncio.gather(*tasks)
 
             next_message = response_parts
@@ -264,7 +344,7 @@ class Agent:
             await thread
 
     async def _execute_function_call(
-        self, call: genai_types.FunctionCall
+        self, call: genai_types.FunctionCall, call_id: str, output_queue: asyncio.Queue
     ) -> genai_types.Part:
         assert call.name is not None
         logger.info("Tool call: %s(%s)", call.name, call.args)
@@ -272,6 +352,9 @@ class Agent:
         try:
             if call.name == "load_skill":
                 payload = {"output": str(await self._load_skill((call.args or {}).get("name", "")))}
+            elif call.name == "run_command":
+                args = call.args or {}
+                payload = await self._run_shell_command(call_id, args.get("command", ""), args.get("cwd"), output_queue)
             elif self._skills is not None and self._skills.tool_owner(call.name) is not None:
                 result = await self._call_skill_tool(call.name, call.args or {})
                 payload = {"output": str(result)}
@@ -285,6 +368,81 @@ class Agent:
             payload = {"error": f"Tool execution failed: {exc}"}
 
         return genai_types.Part.from_function_response(name=call.name, response=payload)
+
+    async def _run_shell_command(
+        self, call_id: str, command: str, cwd: str | None, output_queue: asyncio.Queue
+    ) -> dict[str, Any]:
+        """Run `command` in a real subprocess, pushing ("output", call_id,
+        line) onto `output_queue` as each line of combined stdout/stderr
+        arrives — the caller (stream()) turns those into tool_call_output
+        events so the UI can render a live terminal — then return the full
+        output (capped) plus exit code as the tool's result for Gemini.
+
+        No extra sandboxing beyond the existing allowed_roots filesystem
+        boundary: this app already trusts its single local user with
+        filesystem/browser/Excel control, and a shell tool is the same
+        trust level Claude Code itself runs bash at for a local user.
+        """
+        if not command.strip():
+            return {"error": "No command given."}
+
+        if cwd:
+            workdir = cwd
+        else:
+            SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+            workdir = str(SCRATCH_DIR)
+        try:
+            process = await asyncio.create_subprocess_shell(
+                command,
+                cwd=workdir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except Exception as exc:  # noqa: BLE001 — e.g. cwd doesn't exist
+            return {"error": f"Couldn't start command: {exc}"}
+
+        chunks: list[str] = []
+        assert process.stdout is not None
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+            text = line.decode(errors="replace")
+            chunks.append(text)
+            await output_queue.put(("output", call_id, text))
+
+        exit_code = await process.wait()
+        full_output = "".join(chunks)
+        # Gemini only needs enough of a noisy command's output (a `pip
+        # install` can run to tens of thousands of characters) to reason
+        # about what happened — the user already saw the full stream live.
+        MAX_CHARS = 8000
+        output_for_model = (
+            full_output
+            if len(full_output) <= MAX_CHARS
+            else full_output[: MAX_CHARS // 2] + "\n...[output truncated]...\n" + full_output[-MAX_CHARS // 2 :]
+        )
+        result: dict[str, Any] = {"exit_code": exit_code, "output": output_for_model}
+
+        # A script that produced a deliverable (PDF/PPTX/Excel/whatever) is
+        # told to print `MADS_FILE: <absolute path>` as its last line — see
+        # the run_command system-prompt addendum. Surfacing it as `path`
+        # here, in the exact shape the fixed document skills already return,
+        # means the existing download-chip/preview wiring in server/app.py
+        # and the frontend (both just check result["path"]) picks it up
+        # with no further changes — this is what makes a run_command-built
+        # file previewable in chat instead of just a filesystem path in
+        # prose. The *last* match wins if a script prints more than one.
+        matches = _MADS_FILE_PATTERN.findall(full_output)
+        if matches:
+            try:
+                resolved = Path(matches[-1].strip()).expanduser().resolve()
+                if resolved.is_file() and self._settings.is_path_allowed(resolved):
+                    result["path"] = str(resolved)
+            except OSError:
+                pass  # Malformed path printed by the script — just skip the chip.
+
+        return result
 
     async def _call_skill_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         assert self._skills is not None
