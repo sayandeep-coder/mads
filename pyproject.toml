@@ -26,6 +26,8 @@ dependencies = [
     "uvicorn[standard]>=0.51.0",
     "sse-starlette>=3.4.5",
     "pytesseract>=0.3.13",
+    "psycopg[binary]>=3.3.6",
+    "redis>=8.1.0",
 ]
 
 [project.scripts]

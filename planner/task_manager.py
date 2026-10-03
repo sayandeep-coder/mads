@@ -3,24 +3,35 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 from planner.models import Task, TaskPriority, TaskStatus
-from planner.storage import JsonListStore, project_dir
+from server.db.connection import get_connection
 
 
 class TaskNotFoundError(ValueError):
     """Raised when a task id doesn't exist for a project."""
 
 
-def _list_store(slug: str) -> JsonListStore[Task]:
-    return JsonListStore(project_dir(slug) / "tasks.json", Task)
+def _row_to_task(row: dict) -> Task:
+    return Task(
+        id=row["id"],
+        project_slug=row["project_slug"],
+        title=row["title"],
+        description=row["description"],
+        priority=TaskPriority(row["priority"]),
+        status=TaskStatus(row["status"]),
+        due_date=row["due_date"],
+        tags=row["tags"] or [],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        completed_at=row["completed_at"],
+    )
 
 
 class TaskManager:
     """Project-scoped task tracking: create, list, complete, update, delete.
 
-    Storage is one tasks.json per project (via JsonListStore) — same layout
-    as the original projects/tasks.py, now with a richer Task model
-    (priority, due date, blocked status, tags) so the Planning Engine has
-    something to actually reason about.
+    Backed by the `tasks` table (one row per task, scoped by project_slug) —
+    same Task model (priority, due date, blocked status, tags) as before,
+    just no longer one tasks.json file per project.
     """
 
     def create(
@@ -32,42 +43,49 @@ class TaskManager:
         due_date: date | None = None,
         tags: list[str] | None = None,
     ) -> Task:
-        store = _list_store(project_slug)
-        tasks = store.read_all()
-        next_id = max((t.id for t in tasks), default=0) + 1
         now = datetime.now(timezone.utc)
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO tasks (project_slug, title, description, priority, status,
+                                    due_date, tags, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (project_slug, title, description, priority.value, TaskStatus.OPEN.value,
+                 due_date, tags or [], now, now),
+            )
+            task_id = cur.fetchone()["id"]
 
-        task = Task(
-            id=next_id,
-            project_slug=project_slug,
-            title=title,
-            description=description,
-            priority=priority,
-            status=TaskStatus.OPEN,
-            due_date=due_date,
-            tags=tags or [],
-            created_at=now,
-            updated_at=now,
+        return Task(
+            id=task_id, project_slug=project_slug, title=title, description=description,
+            priority=priority, status=TaskStatus.OPEN, due_date=due_date, tags=tags or [],
+            created_at=now, updated_at=now, completed_at=None,
         )
-        tasks.append(task)
-        store.write_all(tasks)
-        return task
 
     def list_all(
         self,
         project_slug: str,
         status: TaskStatus | None = None,
     ) -> list[Task]:
-        tasks = _list_store(project_slug).read_all()
-        if status is not None:
-            tasks = [t for t in tasks if t.status == status]
-        return tasks
+        with get_connection() as conn, conn.cursor() as cur:
+            if status is not None:
+                cur.execute(
+                    "SELECT * FROM tasks WHERE project_slug = %s AND status = %s ORDER BY id",
+                    (project_slug, status.value),
+                )
+            else:
+                cur.execute("SELECT * FROM tasks WHERE project_slug = %s ORDER BY id", (project_slug,))
+            rows = cur.fetchall()
+        return [_row_to_task(row) for row in rows]
 
     def get(self, project_slug: str, task_id: int) -> Task:
-        for task in _list_store(project_slug).read_all():
-            if task.id == task_id:
-                return task
-        raise TaskNotFoundError(f"No task with id {task_id} in project {project_slug!r}")
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT * FROM tasks WHERE project_slug = %s AND id = %s", (project_slug, task_id))
+            row = cur.fetchone()
+        if row is None:
+            raise TaskNotFoundError(f"No task with id {task_id} in project {project_slug!r}")
+        return _row_to_task(row)
 
     def update(
         self,
@@ -80,52 +98,41 @@ class TaskManager:
         due_date: date | None = None,
         tags: list[str] | None = None,
     ) -> Task:
-        store = _list_store(project_slug)
-        tasks = store.read_all()
+        current = self.get(project_slug, task_id)  # raises TaskNotFoundError if missing
 
-        updated: Task | None = None
-        for index, task in enumerate(tasks):
-            if task.id != task_id:
-                continue
+        now = datetime.now(timezone.utc)
+        new_title = title if title is not None else current.title
+        new_description = description if description is not None else current.description
+        new_priority = priority if priority is not None else current.priority
+        new_due_date = due_date if due_date is not None else current.due_date
+        new_tags = tags if tags is not None else current.tags
+        new_status = status if status is not None else current.status
+        new_completed_at = (now if new_status == TaskStatus.DONE else None) if status is not None else current.completed_at
 
-            changes: dict = {"updated_at": datetime.now(timezone.utc)}
-            if title is not None:
-                changes["title"] = title
-            if description is not None:
-                changes["description"] = description
-            if priority is not None:
-                changes["priority"] = priority
-            if due_date is not None:
-                changes["due_date"] = due_date
-            if tags is not None:
-                changes["tags"] = tags
-            if status is not None:
-                changes["status"] = status
-                changes["completed_at"] = (
-                    datetime.now(timezone.utc) if status == TaskStatus.DONE else None
-                )
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE tasks SET title = %s, description = %s, priority = %s, status = %s,
+                                  due_date = %s, tags = %s, updated_at = %s, completed_at = %s
+                WHERE project_slug = %s AND id = %s
+                """,
+                (new_title, new_description, new_priority.value, new_status.value, new_due_date,
+                 new_tags, now, new_completed_at, project_slug, task_id),
+            )
 
-            updated = task.model_copy(update=changes)
-            tasks[index] = updated
-            break
-
-        if updated is None:
-            raise TaskNotFoundError(f"No task with id {task_id} in project {project_slug!r}")
-
-        store.write_all(tasks)
-        return updated
+        return Task(
+            id=task_id, project_slug=project_slug, title=new_title, description=new_description,
+            priority=new_priority, status=new_status, due_date=new_due_date, tags=new_tags,
+            created_at=current.created_at, updated_at=now, completed_at=new_completed_at,
+        )
 
     def complete(self, project_slug: str, task_id: int) -> Task:
         return self.update(project_slug, task_id, status=TaskStatus.DONE)
 
     def delete(self, project_slug: str, task_id: int) -> bool:
-        store = _list_store(project_slug)
-        tasks = store.read_all()
-        remaining = [t for t in tasks if t.id != task_id]
-        if len(remaining) == len(tasks):
-            return False
-        store.write_all(remaining)
-        return True
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM tasks WHERE project_slug = %s AND id = %s", (project_slug, task_id))
+            return cur.rowcount > 0
 
     def project_progress(self, project_slug: str) -> tuple[int, int, int]:
         """Return (open_count, blocked_count, done_count) for a project."""
