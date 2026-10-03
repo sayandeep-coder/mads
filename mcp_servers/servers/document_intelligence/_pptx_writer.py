@@ -67,7 +67,7 @@ def _add_footer(slide, slide_number: int, accent) -> None:
     )
 
 
-def _build_title_slide(prs: Presentation, spec: dict[str, Any], accent) -> None:
+def _build_title_slide(prs: Presentation, spec: dict[str, Any], accent) -> Any:
     slide = _blank_slide(prs)
     _fill_background(slide, theme.LIGHT_BG)
     _add_accent_bar(slide, accent)
@@ -81,9 +81,10 @@ def _build_title_slide(prs: Presentation, spec: dict[str, Any], accent) -> None:
     subtitle = spec.get("subtitle", "")
     if subtitle:
         _add_textbox(slide, 0.7, 3.2, theme.SLIDE_WIDTH_IN - 1.4, 0.6, subtitle, theme.SUBTITLE_SIZE, theme.MUTED)
+    return slide
 
 
-def _build_section_slide(prs: Presentation, spec: dict[str, Any], accent) -> None:
+def _build_section_slide(prs: Presentation, spec: dict[str, Any], accent) -> Any:
     slide = _blank_slide(prs)
     _fill_background(slide, accent)
 
@@ -95,6 +96,8 @@ def _build_section_slide(prs: Presentation, spec: dict[str, Any], accent) -> Non
         slide, 0.7, theme.SLIDE_HEIGHT_IN / 2 - 0.6, theme.SLIDE_WIDTH_IN - 1.4, 1.2,
         title, theme.SECTION_TITLE_SIZE, theme.WHITE, bold=True,
     )
+    return slide
+
 
 
 def _add_slide_title(slide, title: str, accent) -> None:
@@ -102,7 +105,7 @@ def _add_slide_title(slide, title: str, accent) -> None:
     _add_textbox(slide, 0.6, 0.35, theme.SLIDE_WIDTH_IN - 1.2, 0.8, title, theme.SLIDE_TITLE_SIZE, theme.INK, bold=True)
 
 
-def _build_bullets_slide(prs: Presentation, spec: dict[str, Any], accent, slide_number: int) -> None:
+def _build_bullets_slide(prs: Presentation, spec: dict[str, Any], accent, slide_number: int) -> Any:
     slide = _blank_slide(prs)
     _fill_background(slide, theme.WHITE)
 
@@ -120,9 +123,10 @@ def _build_bullets_slide(prs: Presentation, spec: dict[str, Any], accent, slide_
     add_markdown_bullets(box.text_frame, bullets, theme.BODY_SIZE, theme.INK)
 
     _add_footer(slide, slide_number, accent)
+    return slide
 
 
-def _build_table_slide(prs: Presentation, spec: dict[str, Any], accent, slide_number: int) -> None:
+def _build_table_slide(prs: Presentation, spec: dict[str, Any], accent, slide_number: int) -> Any:
     slide = _blank_slide(prs)
     _fill_background(slide, theme.WHITE)
 
@@ -155,9 +159,10 @@ def _build_table_slide(prs: Presentation, spec: dict[str, Any], accent, slide_nu
             apply_bold_runs(cell.text_frame.paragraphs[0], value, theme.BODY_SIZE, theme.INK)
 
     _add_footer(slide, slide_number, accent)
+    return slide
 
 
-def _build_chart_slide(prs: Presentation, spec: dict[str, Any], accent, slide_number: int) -> None:
+def _build_chart_slide(prs: Presentation, spec: dict[str, Any], accent, slide_number: int) -> Any:
     slide = _blank_slide(prs)
     _fill_background(slide, theme.WHITE)
 
@@ -185,9 +190,56 @@ def _build_chart_slide(prs: Presentation, spec: dict[str, Any], accent, slide_nu
     )
 
     _add_footer(slide, slide_number, accent)
+    return slide
 
 
-def _build_comparison_slide(prs: Presentation, spec: dict[str, Any], accent, slide_number: int) -> None:
+def _build_image_slide(prs: Presentation, spec: dict[str, Any], accent, slide_number: int) -> Any:
+    slide = _blank_slide(prs)
+    _fill_background(slide, theme.WHITE)
+
+    title = spec.get("title", "").strip()
+    image_path = spec.get("path")
+    if not image_path:
+        raise PptxGenerationError("Image slide requires a non-empty 'path'")
+
+    if title:
+        _add_slide_title(slide, title, accent)
+        image_top = 1.5
+        image_area_height = theme.SLIDE_HEIGHT_IN - 2.3
+    else:
+        _add_accent_bar(slide, accent)
+        image_top = 0.6
+        image_area_height = theme.SLIDE_HEIGHT_IN - 1.4
+
+    caption = spec.get("caption", "")
+    if caption:
+        image_area_height -= 0.5
+
+    # Fit the image inside the available area without distorting it —
+    # python-pptx sizes a picture by whichever single dimension (width or
+    # height) is passed, scaling the other to preserve aspect ratio, so
+    # pick height as the constraint here since slide layouts are wider
+    # than they are tall and the image area is height-limited.
+    picture = slide.shapes.add_picture(
+        image_path, Inches(0.8), Inches(image_top), height=Inches(image_area_height)
+    )
+    # Center horizontally if the fitted image is narrower than the slide.
+    max_left = Inches(theme.SLIDE_WIDTH_IN) - picture.width
+    if max_left > 0:
+        picture.left = int((Inches(theme.SLIDE_WIDTH_IN) - picture.width) / 2)
+
+    if caption:
+        caption_top = image_top + image_area_height + 0.15
+        _add_textbox(
+            slide, 0.8, caption_top, theme.SLIDE_WIDTH_IN - 1.6, 0.4,
+            caption, theme.CAPTION_SIZE, theme.MUTED, align=PP_ALIGN.CENTER,
+        )
+
+    _add_footer(slide, slide_number, accent)
+    return slide
+
+
+def _build_comparison_slide(prs: Presentation, spec: dict[str, Any], accent, slide_number: int) -> Any:
     slide = _blank_slide(prs)
     _fill_background(slide, theme.WHITE)
 
@@ -219,6 +271,8 @@ def _build_comparison_slide(prs: Presentation, spec: dict[str, Any], accent, sli
         add_markdown_bullets(frame, points, theme.CAPTION_SIZE, theme.INK)
 
     _add_footer(slide, slide_number, accent)
+    return slide
+
 
 
 _BUILDERS = {
@@ -227,6 +281,7 @@ _BUILDERS = {
     "bullets": _build_bullets_slide,
     "table": _build_table_slide,
     "chart": _build_chart_slide,
+    "image": _build_image_slide,
     "comparison": _build_comparison_slide,
 }
 
@@ -236,9 +291,11 @@ _NO_NUMBER_TYPES = {"title", "section"}
 def create_presentation(path: Path, slides: list[dict[str, Any]], accent_color: str | None = None) -> None:
     """Build a real, valid .pptx file from a list of slide specs.
 
-    Each spec is a dict with a 'type' key (title/section/bullets/table/chart/comparison)
-    plus type-specific fields. Uses python-pptx's real shape/table/chart/text APIs on
-    blank layouts with an explicit theme — never a bare-bones default-template dump.
+    Each spec is a dict with a 'type' key (title/section/bullets/table/chart/image/comparison)
+    plus type-specific fields, and an optional 'notes' string — real speaker notes attached to
+    that slide, visible in presenter view, not printed on the slide itself. Uses python-pptx's
+    real shape/table/chart/picture/text APIs on blank layouts with an explicit theme — never a
+    bare-bones default-template dump.
     """
     if not slides:
         raise PptxGenerationError("slides must be a non-empty list")
@@ -254,9 +311,13 @@ def create_presentation(path: Path, slides: list[dict[str, Any]], accent_color: 
             raise PptxGenerationError(f"Unknown slide type {slide_type!r}; must be one of {list(_BUILDERS)}")
 
         if slide_type in _NO_NUMBER_TYPES:
-            builder(prs, spec, accent)
+            slide = builder(prs, spec, accent)
         else:
             numbered_slide_count += 1
-            builder(prs, spec, accent, numbered_slide_count)
+            slide = builder(prs, spec, accent, numbered_slide_count)
+
+        notes = spec.get("notes")
+        if notes and slide is not None:
+            slide.notes_slide.notes_text_frame.text = notes
 
     prs.save(str(path))
