@@ -207,3 +207,22 @@ textarea:focus-visible {
     opacity: 0;
   }
 }
+
+/* Each ToolCallRow mounts the instant its tool_call_started SSE event
+   arrives — without this, a fast sequence of tool calls just pops a
+   static list into place, which reads as "the whole thing loaded at
+   once" even though the data genuinely streamed in one event at a time.
+   This makes that live arrival visible. */
+.mads-tool-row-enter {
+  animation: mads-tool-row-in 0.22s ease-out;
+}
+@keyframes mads-tool-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

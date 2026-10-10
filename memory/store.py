@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from server.db.connection import get_connection
+from server.embeddings import embed_text
 
 _VALID_CATEGORIES = {"preference", "project", "decision", "person", "identity"}
 
@@ -46,15 +47,16 @@ def remember(category: str, content: str, tags: list[str] | None = None) -> Memo
     _validate_category(category)
     now = datetime.now(timezone.utc).isoformat()
     tags_str = ",".join(tags or [])
+    embedding = embed_text(content)
 
     with get_connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO memories (category, content, tags, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO memories (category, content, tags, embedding, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (category, content, tags_str, now, now),
+            (category, content, tags_str, embedding, now, now),
         )
         memory_id = cur.fetchone()["id"]
 
@@ -88,10 +90,13 @@ def update_memory(
         new_tags = ",".join(tags) if tags is not None else row["tags"]
         new_category = category if category is not None else row["category"]
         now = datetime.now(timezone.utc).isoformat()
+        # Only re-embed when the content actually changed — a tags/category-only
+        # edit doesn't change what the memory means semantically.
+        new_embedding = embed_text(new_content) if content is not None else row["embedding"]
 
         cur.execute(
-            "UPDATE memories SET content = %s, tags = %s, category = %s, updated_at = %s WHERE id = %s",
-            (new_content, new_tags, new_category, now, memory_id),
+            "UPDATE memories SET content = %s, tags = %s, category = %s, embedding = %s, updated_at = %s WHERE id = %s",
+            (new_content, new_tags, new_category, new_embedding, now, memory_id),
         )
         cur.execute("SELECT * FROM memories WHERE id = %s", (memory_id,))
         updated_row = cur.fetchone()

@@ -444,9 +444,9 @@ several `approve_candidate` calls at once) can no longer corrupt these files.
 | **PDF Annotator** | PyMuPDF — circle text and add notes on existing PDFs | 1 |
 | **Image** | Pollinations — local only, no MCP | 1 |
 | **System Tool** | `osascript`, `psutil`, native macOS commands — local only, no MCP | 13 |
-| **Memory Engine** | SQLite (`~/.mads/memory.sqlite3`) — preference/project/decision/person/identity | 5 |
-| **Planner** | `planner/` — projects, tasks, prompts, daily plan, dashboard | 14 |
-| **Adaptive Intelligence** | `adaptive/` — approval queue + learned profile (import itself is CLI-only, not a tool) | 4 |
+| **Memory Engine** | Postgres (`memories` table) + pgvector semantic search — preference/project/decision/person/identity | 5 |
+| **Planner** | `planner/` — projects, tasks, prompts, daily plan, dashboard — Postgres-backed | 14 |
+| **Adaptive Intelligence** | `adaptive/` — approval queue + learned profile (import itself is CLI-only, not a tool); approved facts get pgvector embeddings too | 4 |
 | **Astrology** | FreeAstrologyAPI (API key) — Vedic chart, dashas, good/bad times | 1 |
 | **Skills (PDF)** | `skills/pdf.py` — read (OCR fallback), create, annotate, extract tables, diff | 5 |
 | **Skills (Excel)** | `skills/excel.py` — read, create with real Tables/Charts/Formats | 2 |
@@ -454,6 +454,19 @@ several `approve_candidate` calls at once) can no longer corrupt these files.
 | **Skills (PPTX)** | `skills/pptx.py` — read, create | 2 |
 | **Browser Control** | Chrome extension ↔ `/ws/browser` WebSocket — extract page, click, type, navigate | 6 |
 | **Excel Control** | Office add-in ↔ `/ws/excel` WebSocket — list sheets, read/write ranges, get selection | 5 |
+| **Swiggy** *(connect from the Tools page)* | Remote MCP via `mcp-remote` — food ordering; invite-only production access | — |
+| **Zepto** *(connect from the Tools page)* | Remote MCP via `mcp-remote` — quick-commerce groceries; India-only | — |
+| **Groww** *(connect from the Tools page)* | Remote MCP via `mcp-remote` — real stock/F&O trades on a real brokerage account | — |
+| **Zomato** *(connect from the Tools page)* | Remote MCP via `mcp-remote` — food ordering; approval-gated by Zomato | — |
+
+The four connectors above place **real orders or real trades with real money** once their OAuth
+flow completes, so unlike every other provider here, none of them ever auto-connects at server
+startup — each only connects when you click **Connect** on its card on the `/tools` page, which
+hits `POST /api/connectors/{id}/connect` and opens that service's OAuth login in a browser right
+then. The agent is also instructed to always state the exact order/trade and get an explicit yes
+before calling anything that spends money (see `agent/system_prompt.py`'s
+`_COMMERCE_CONFIRMATION_ADDENDUM`). Browsing/search/portfolio-lookup tools from the same
+connectors are unrestricted.
 
 (External stdio MCP servers don't expose a fixed tool count from this codebase — it's whatever
 that server's own release defines.)

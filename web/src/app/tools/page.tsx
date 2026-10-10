@@ -1,8 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { API_BASE } from "@/lib/useChat";
+import { toast } from "@/lib/toast";
+
+// Connectors with no cached OAuth token yet only ever connect via an
+// explicit click here — see server/app.py's /api/connectors/{id}/connect
+// and agent/session.py's COMMERCE_CONNECTORS for why these specifically
+// (unlike every other service on this page) are never auto-connected at
+// server startup.
+const CONNECTABLE_IDS = new Set(["swiggy", "zepto", "groww", "zomato"]);
 
 interface ToolEntry {
   id: string;
@@ -31,6 +39,10 @@ const SERVICES: ToolEntry[] = [
   { id: "youtube", name: "YouTube", description: "Search and read video details", logo: "/logos/youtube.svg", tileBg: "#ffffff" },
   { id: "spotify", name: "Spotify", description: "Search and control playback", logo: "/logos/spotify.svg", tileBg: "#ffffff" },
   { id: "maps", name: "Google Maps", description: "Places and directions", logo: "/logos/googlemaps.svg", tileBg: "#ffffff" },
+  { id: "swiggy", name: "Swiggy", description: "Order food — invite-only access", logo: "/logos/swiggy.svg", tileBg: "#ffffff" },
+  { id: "zepto", name: "Zepto", description: "Quick-commerce grocery delivery", logo: "/logos/zepto.jpg", tileBg: "#ffffff" },
+  { id: "groww", name: "Groww", description: "Stocks, F&O, and real trades", logo: "/logos/groww.png", tileBg: "#ffffff" },
+  { id: "zomato", name: "Zomato", description: "Order food — approval-gated access", logo: "/logos/zomato.svg", tileBg: "#ffffff" },
 ];
 
 const BUILTIN: ToolEntry[] = [
@@ -52,6 +64,7 @@ export default function ToolsPage() {
   const [connected, setConnected] = useState<string[] | null>(null);
   const [error, setError] = useState(false);
   const [query, setQuery] = useState("");
+  const [connectingId, setConnectingId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,6 +84,27 @@ export default function ToolsPage() {
   }, []);
 
   const isConnected = (id: string) => connected?.includes(id) ?? false;
+
+  // Can take up to ~20s (mcp_servers/manager.py's _CONNECT_TIMEOUT_SECONDS)
+  // since a service with no cached OAuth token yet opens a real browser
+  // login right then — the button shows a spinner for the whole wait
+  // rather than looking frozen.
+  const handleConnect = useCallback(async (id: string) => {
+    setConnectingId(id);
+    try {
+      const res = await fetch(`${API_BASE}/api/connectors/${id}/connect`, { method: "POST" });
+      const data = await res.json();
+      if (data.connected) {
+        setConnected((prev) => (prev ? [...new Set([...prev, id])] : [id]));
+      } else {
+        toast(data.error || `Couldn't connect — check the backend's logs for ${id}.`);
+      }
+    } catch {
+      toast("Couldn't reach Mads to connect that service.");
+    } finally {
+      setConnectingId(null);
+    }
+  }, []);
 
   const q = query.trim().toLowerCase();
   const matches = (t: ToolEntry) => !q || t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q);
@@ -137,7 +171,13 @@ export default function ToolsPage() {
           <h2 className="text-[13px] font-medium text-text-muted">Connected services</h2>
           <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
             {visibleServices.map((t) => (
-              <ToolCard key={t.id} tool={t} connected={isConnected(t.id)} />
+              <ToolCard
+                key={t.id}
+                tool={t}
+                connected={isConnected(t.id)}
+                connecting={connectingId === t.id}
+                onConnect={handleConnect}
+              />
             ))}
           </div>
         </section>
@@ -155,8 +195,20 @@ export default function ToolsPage() {
   );
 }
 
-function ToolCard({ tool, connected }: { tool: ToolEntry; connected: boolean }) {
+function ToolCard({
+  tool,
+  connected,
+  connecting,
+  onConnect,
+}: {
+  tool: ToolEntry;
+  connected: boolean;
+  connecting?: boolean;
+  onConnect?: (id: string) => void;
+}) {
   const Icon = tool.Icon;
+  const showConnectButton = !connected && CONNECTABLE_IDS.has(tool.id) && onConnect;
+
   return (
     <div className="flex items-center gap-3.5 rounded-2xl border border-border bg-surface px-4 py-3.5">
       <div
@@ -174,15 +226,36 @@ function ToolCard({ tool, connected }: { tool: ToolEntry; connected: boolean }) 
         <p className="truncate text-[14px] font-medium text-text">{tool.name}</p>
         <p className="truncate text-[12px] text-text-muted">{tool.description}</p>
       </div>
-      <span
-        className={`flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ${
-          connected ? "bg-accent/15 text-accent" : "bg-text-faint/15 text-text-faint"
-        }`}
-      >
-        <span className={`h-1.5 w-1.5 rounded-full ${connected ? "bg-accent" : "bg-text-faint"}`} />
-        {connected ? "Connected" : "Not connected"}
-      </span>
+      {showConnectButton ? (
+        <button
+          type="button"
+          onClick={() => onConnect(tool.id)}
+          disabled={connecting}
+          className="flex shrink-0 items-center gap-1.5 rounded-full bg-text px-3 py-1.5 text-[11px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-60"
+        >
+          {connecting && <SpinnerIcon />}
+          {connecting ? "Connecting…" : "Connect"}
+        </button>
+      ) : (
+        <span
+          className={`flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ${
+            connected ? "bg-green-500/15 text-green-500" : "bg-text-faint/15 text-text-faint"
+          }`}
+        >
+          <span className={`h-1.5 w-1.5 rounded-full ${connected ? "bg-green-500" : "bg-text-faint"}`} />
+          {connected ? "Connected" : "Not connected"}
+        </span>
+      )}
     </div>
+  );
+}
+
+function SpinnerIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="11" height="11" className="animate-spin" fill="none">
+      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2" />
+      <path d="M14 8a6 6 0 0 0-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
   );
 }
 

@@ -189,6 +189,23 @@ instructions; read those once and follow them. Never invent a document \
 tool name you haven't seen from a loaded skill's own instructions."""
 
 
+_COMMERCE_CONFIRMATION_ADDENDUM = """\
+
+If Swiggy, Zepto, Zomato, or Groww tools are available in this conversation, \
+they place real orders or real trades with real money on Sayan's actual \
+accounts — there is no sandbox and no undo. Before calling ANY tool from \
+one of these that places an order, adds something to a cart with intent to \
+checkout, places a trade, or otherwise spends money (not browsing/search/menu/ \
+price/portfolio-lookup tools, which are read-only and fine to call freely), \
+you MUST state the exact action in plain language — what's being bought/ \
+traded, quantity, and price if known — and get an explicit yes from Sayan in \
+this same conversation first. A prior approval for a similar-sounding request \
+does not carry over to a new one; confirm every single order/trade on its own, \
+even back-to-back ones. If Sayan's message already contains unambiguous, \
+specific confirmation in the same turn ("yes order it", "confirm the trade"), \
+that counts — you don't need to ask again just to ask again."""
+
+
 _RUN_COMMAND_ADDENDUM = """\
 
 Your scratch workspace for throwaway helper scripts is {scratch_dir} — \
@@ -363,6 +380,7 @@ def build_system_prompt(
         # (e.g. `{output_path}`), which .format would wrongly try to
         # resolve as placeholders too and raise KeyError on.
         prompt = f"{prompt}\n{_RUN_COMMAND_ADDENDUM.replace('{scratch_dir}', str(SCRATCH_DIR))}"
+        prompt = f"{prompt}\n{_COMMERCE_CONFIRMATION_ADDENDUM}"
 
     return prompt
 

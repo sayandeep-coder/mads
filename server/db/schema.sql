@@ -9,6 +9,8 @@
 -- into a shared database doesn't reduce its exposure, it just adds a new
 -- network boundary to trust.
 
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- ── Chat sessions (server/store.py) ──────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -37,11 +39,18 @@ CREATE TABLE IF NOT EXISTS memories (
     category TEXT NOT NULL CHECK (category IN ('preference', 'project', 'decision', 'person', 'identity')),
     content TEXT NOT NULL,
     tags TEXT NOT NULL DEFAULT '',
+    -- gemini-embedding-001, truncated to 768 dims — see server/embeddings.py.
+    -- Nullable: a memory written before this column existed, or written
+    -- while the embedding API happened to fail, still works, it just falls
+    -- out of semantic search until backfilled (search_memory only ever
+    -- selects WHERE embedding IS NOT NULL).
+    embedding vector(768),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories USING hnsw (embedding vector_cosine_ops);
 
 -- ── Planner: projects, tasks, prompts (planner/models.py + storage.py) ──
 
@@ -120,9 +129,13 @@ CREATE TABLE IF NOT EXISTS adaptive_approved_facts (
     category TEXT NOT NULL CHECK (category IN ('preference', 'decision', 'workflow', 'constraint', 'identity')),
     statement TEXT NOT NULL,
     confidence DOUBLE PRECISION NOT NULL,
+    embedding vector(768),
     approved_at TIMESTAMPTZ NOT NULL,
     source_conversation_ids TEXT[] NOT NULL DEFAULT '{}'
 );
+
+CREATE INDEX IF NOT EXISTS idx_adaptive_approved_embedding
+    ON adaptive_approved_facts USING hnsw (embedding vector_cosine_ops);
 
 CREATE TABLE IF NOT EXISTS adaptive_ledger (
     conversation_id TEXT PRIMARY KEY,

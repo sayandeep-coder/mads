@@ -128,13 +128,29 @@ export function Message({
   // finishing and the first word of text actually appearing.
   const showTyping = message.pending && !displayedText;
   const isTyping = message.pending && displayedText.length < message.text.length;
+  // message.incomplete (see useChat.ts) means the SSE connection ended
+  // before a final_response ever arrived — a dropped stream, not a short
+  // real answer. It can happen with partial text already on screen (cut
+  // off mid-sentence) or with nothing at all.
+  const cutOff = !message.pending && message.incomplete;
+  // Separately: the turn can also end with a REAL final_response that
+  // just happens to carry no text and produced no tool calls/files either
+  // — Gemini silently returning nothing, which has shown up in practice
+  // (a long/garbled history from earlier broken turns confusing a later
+  // round into an empty reply). That's not "incomplete" in the dropped-
+  // connection sense, but it's exactly as invisible on screen if nothing
+  // is shown for it, so it needs the same visible fallback.
+  const finishedEmpty =
+    !message.pending && !message.incomplete && !displayedText && message.toolCalls.length === 0 && message.files.length === 0;
 
   return (
     <div className="flex flex-col gap-2.5">
       {message.toolCalls.length > 0 && (
         <div className="flex flex-col gap-1.5">
           {message.toolCalls.map((call, i) => (
-            <ToolCallRow key={`${call.name}-${i}`} call={call} />
+            <div key={`${call.name}-${i}`} className="mads-tool-row-enter">
+              <ToolCallRow call={call} />
+            </div>
           ))}
         </div>
       )}
@@ -142,12 +158,27 @@ export function Message({
       {showTyping ? (
         <TypingIndicator />
       ) : (
-        displayedText && (
-          <div className="max-w-[75ch] text-[15px] leading-6 text-text">
-            <MarkdownText text={displayedText} onRunCode={onRunCode} />
-            {isTyping && <span className="typing-caret" aria-hidden="true" />}
-          </div>
-        )
+        <>
+          {displayedText && (
+            <div className="max-w-[75ch] text-[15px] leading-6 text-text">
+              <MarkdownText text={displayedText} onRunCode={onRunCode} />
+              {isTyping && <span className="typing-caret" aria-hidden="true" />}
+            </div>
+          )}
+          {cutOff && (
+            <p className="flex items-center gap-1.5 text-[13px] text-text-muted">
+              <CutOffIcon />
+              {displayedText ? "Response cut off — the connection dropped." : "No reply came back — the connection may have dropped."}{" "}
+              Try asking again.
+            </p>
+          )}
+          {finishedEmpty && (
+            <p className="flex items-center gap-1.5 text-[13px] text-text-muted">
+              <CutOffIcon />
+              Mads didn&apos;t return a reply for that one. Try asking again, or start a new chat if it keeps happening.
+            </p>
+          )}
+        </>
       )}
 
       {message.files.length > 0 && (
@@ -256,7 +287,20 @@ function MarkdownText({ text, onRunCode }: { text: string; onRunCode?: (language
       continue;
     }
 
-    const paragraph: string[] = [];
+    // This line reached here precisely because none of the block parsers
+    // above matched it — including isBlockStart's own looser checks (e.g.
+    // a numbered-list line streamed in up to "1. " with its content not
+    // arrived yet: isBlockStart's regex only needs trailing whitespace, so
+    // it says yes, but the stricter `(.+)$` ordered-list match above says
+    // no). Looping on `!isBlockStart(line)` for even the FIRST line here
+    // can then be false immediately — zero lines consumed, `index` never
+    // advances, and the outer while loop spins on it forever, hanging the
+    // tab. Always consuming this line unconditionally guarantees forward
+    // progress regardless of what isBlockStart thinks about it; only
+    // lines AFTER the first still defer to it, for normal multi-line
+    // paragraph joining.
+    const paragraph: string[] = [lines[index].trim()];
+    index += 1;
     while (index < lines.length && lines[index].trim() && !isBlockStart(lines[index])) {
       paragraph.push(lines[index].trim());
       index += 1;
@@ -404,6 +448,15 @@ function CodeBlock({
         <code>{code}</code>
       </pre>
     </div>
+  );
+}
+
+function CutOffIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none" className="shrink-0">
+      <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M8 5v3.5M8 11h.01" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
   );
 }
 

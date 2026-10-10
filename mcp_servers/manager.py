@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import AsyncExitStack
@@ -10,6 +11,16 @@ from mcp import ClientSession, StdioServerParameters, Tool
 from mcp.client.stdio import stdio_client
 
 logger = logging.getLogger(__name__)
+
+# How long one provider's connect() gets before it's given up on. Exists
+# because a stdio MCP server that needs a one-time interactive OAuth
+# login (e.g. the mcp-remote-bridged commerce connectors — Swiggy, Zepto,
+# Groww, Zomato) has no cached token on first use and will sit waiting on
+# a browser flow nobody's completed; with no timeout, that one provider's
+# await blocks every provider connected after it, and MCPManager.connect()
+# is what server/app.py's lifespan awaits — so one stuck login silently
+# hangs the entire backend's startup, not just that one connector.
+_CONNECT_TIMEOUT_SECONDS = 20
 
 
 class MCPToolNotFoundError(RuntimeError):
@@ -57,7 +68,14 @@ class StdioToolProvider:
         return self._name
 
     async def connect(self, exit_stack: AsyncExitStack) -> None:
-        if logger.isEnabledFor(logging.DEBUG):
+        # mcp-remote (the stdio bridge the commerce connectors — Swiggy,
+        # Zepto, Groww, Zomato — use to reach a remote OAuth-gated MCP
+        # server) prints its "open this URL to log in" message to stderr,
+        # same channel as every routine startup banner — suppressing it
+        # unconditionally (the branch below) silently swallowed the one
+        # thing a first-time connect actually needs the user to see.
+        is_oauth_bridge = self._params.command == "npx" and "mcp-remote" in self._params.args
+        if is_oauth_bridge or logger.isEnabledFor(logging.DEBUG):
             transport = stdio_client(self._params)
         else:
             # MCP servers commonly print startup banners and routine INFO logs to
@@ -102,13 +120,39 @@ class MCPManager:
         return list(self._connected)
 
     async def connect(self, providers: list[ToolProvider]) -> None:
-        """Connect to each provider, skipping (and logging) any that fail to start."""
+        """Connect to each provider at startup, skipping (and logging) any
+        that fail or time out — see connect_one for the shared logic and
+        _CONNECT_TIMEOUT_SECONDS for why a timeout is load-bearing here.
+        """
         for provider in providers:
-            try:
-                await self._connect_one(provider)
-                self._connected.append(provider.name)
-            except Exception:
-                logger.exception("Failed to connect provider %r", provider.name)
+            await self.connect_one(provider)
+
+    async def connect_one(self, provider: ToolProvider) -> tuple[bool, str | None]:
+        """Connect a single provider, on a timeout so a stuck interactive
+        login (OAuth browser flow nobody's completed) can't hang the
+        caller forever. Used both by connect() at startup and by
+        server/app.py's on-demand "Connect" endpoint for the commerce
+        connectors (Swiggy/Zepto/Groww/Zomato), which are never auto-
+        connected at startup — only ever by an explicit click, since each
+        one's first connection pops open a real OAuth login for a real
+        account. Returns (connected, error_message).
+        """
+        if provider.name in self._providers:
+            return True, None  # already connected — calling again is a no-op, not an error
+        try:
+            await asyncio.wait_for(self._connect_one(provider), timeout=_CONNECT_TIMEOUT_SECONDS)
+            self._connected.append(provider.name)
+            return True, None
+        except TimeoutError:
+            message = (
+                f"Didn't connect within {_CONNECT_TIMEOUT_SECONDS}s — likely waiting on an "
+                "interactive login (OAuth browser flow) nobody completed."
+            )
+            logger.error("Provider %r: %s", provider.name, message)
+            return False, message
+        except Exception as exc:  # noqa: BLE001 — surface any failure back to the caller
+            logger.exception("Failed to connect provider %r", provider.name)
+            return False, str(exc)
 
     async def _connect_one(self, provider: ToolProvider) -> None:
         await provider.connect(self._exit_stack)

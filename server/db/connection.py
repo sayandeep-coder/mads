@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 
-import psycopg
 from dotenv import load_dotenv
+from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
 # ChatStore's module-level `chat_store = ChatStore()` singleton is
 # imported (server/app.py) before config.settings.get_settings() ever
@@ -13,12 +14,42 @@ from psycopg.rows import dict_row
 # which module happens to touch the database first.
 load_dotenv(override=False)
 
+_pool: ConnectionPool | None = None
 
-def get_connection() -> psycopg.Connection:
-    """One psycopg connection per call, dict-row results — same per-call-
-    connection posture the old sqlite3 stores used (this app is single-
-    user/single-process, so connection pooling isn't warranted), just
-    pointed at Postgres (DATABASE_URL, e.g. a Neon branch) instead of a
-    local file.
+
+def _configure(conn) -> None:
+    conn.row_factory = dict_row
+    conn.autocommit = True
+    register_vector(conn)
+
+
+def get_db_pool() -> ConnectionPool:
+    """A pooled connection to Neon opens once per process and is reused —
+    a fresh psycopg.connect() per call was costing ~2 SECONDS on every
+    single query (confirmed by timing a bare `SELECT 1`: Neon's serverless
+    compute has real TLS-handshake + connection-routing overhead per new
+    connection, not a per-query cost), which made every store in this app
+    — chat, memory, planner, adaptive — far slower than it needed to be.
+    A warm pooled connection cuts that same query to tens of milliseconds.
     """
-    return psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row, autocommit=True)
+    global _pool
+    if _pool is None:
+        _pool = ConnectionPool(
+            os.environ["DATABASE_URL"],
+            min_size=1,
+            max_size=5,
+            configure=_configure,
+            # Single-user app behind a handful of concurrent requests at
+            # most (one chat turn, maybe a background migration script) —
+            # 5 is headroom, not a number tuned against real contention.
+        )
+    return _pool
+
+
+def get_connection():
+    """Context manager yielding a pooled connection with dict-row results
+    and pgvector's `vector` type already registered — `with get_connection()
+    as conn, conn.cursor() as cur:` works exactly as it did with a bare
+    psycopg.connect(), just backed by the pool instead of a new socket.
+    """
+    return get_db_pool().connection()
