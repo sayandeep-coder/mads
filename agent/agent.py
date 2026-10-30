@@ -14,7 +14,7 @@ from google import genai
 from google.genai import types as genai_types
 
 from agent.system_prompt import build_system_prompt
-from agent.tools import mcp_tool_to_function_declaration
+from agent.tools import mcp_tool_to_function_declaration, mcp_tools_to_function_declarations
 from config.settings import SCRATCH_DIR, Settings
 from mcp_servers.manager import MCPManager, MCPToolNotFoundError
 from skills.registry import SkillRegistry
@@ -141,22 +141,24 @@ class Agent:
         self._client = genai.Client(api_key=settings.gemini_api_key)
         self._settings = settings
         self._skills = skill_registry
+        # Remembered so refresh_base_tools() can rebuild _base_declarations
+        # identically to how __init__ built it the first time, without
+        # needing browser_mode/excel_mode passed in again later.
+        self._run_command_enabled = not browser_mode and not excel_mode
         # Names of skills whose real tools have been merged into the live
         # tool list this session — see _ensure_skill_loaded. Starts empty
         # every session/reset: skills are always loaded on demand fresh,
         # same as Claude Code re-discovering skills each conversation.
         self._loaded_skills: set[str] = set()
 
-        self._base_declarations = [
-            mcp_tool_to_function_declaration(tool) for tool in mcp_manager.list_tools()
-        ]
+        self._base_declarations = mcp_tools_to_function_declarations(mcp_manager.list_tools())
         if self._skills is not None and self._skills.all():
             self._base_declarations.append(_LOAD_SKILL_TOOL)
         # Shell access is a full-fleet capability, deliberately left out of
         # the browser/Excel side-panel sessions the same way their provider
         # list already excludes filesystem/system/etc. — see
         # agent.session.build_browser_session and build_excel_session.
-        if not browser_mode and not excel_mode:
+        if self._run_command_enabled:
             self._base_declarations.append(_RUN_COMMAND_TOOL)
 
         self._system_instruction = build_system_prompt(
@@ -175,6 +177,33 @@ class Agent:
     def _build_config(self, declarations: list[genai_types.FunctionDeclaration]) -> genai_types.GenerateContentConfig:
         tools = [genai_types.Tool(function_declarations=declarations)] if declarations else None
         return genai_types.GenerateContentConfig(system_instruction=self._system_instruction, tools=tools)
+
+    def refresh_base_tools(self) -> None:
+        """Re-read mcp_manager.list_tools() and rebuild the live tool list
+        from it — for when a provider connects AFTER this Agent was already
+        constructed (the Tools page's on-demand "Connect" button for
+        Swiggy/Zepto/Groww/Zomato: MCPManager gets a new provider mid-
+        session, but this Agent's __init__ already snapshotted
+        _base_declarations before that happened). Recreates the chat with
+        history preserved, same approach _load_skill uses to expand the
+        tool list without losing the conversation — currently-loaded
+        skills' tools are kept too, not just the base MCP tools.
+        """
+        self._base_declarations = mcp_tools_to_function_declarations(self._mcp.list_tools())
+        if self._skills is not None and self._skills.all():
+            self._base_declarations.append(_LOAD_SKILL_TOOL)
+        if self._run_command_enabled:
+            self._base_declarations.append(_RUN_COMMAND_TOOL)
+
+        new_declarations = list(self._base_declarations)
+        for loaded_name in self._loaded_skills:
+            skill = self._skills.get(loaded_name) if self._skills is not None else None
+            if skill is not None:
+                new_declarations.extend(mcp_tool_to_function_declaration(tool) for tool in skill.tools)
+
+        history = self._chat.get_history()
+        self._config = self._build_config(new_declarations)
+        self._chat = self._client.chats.create(model=self._model, config=self._config, history=history)
 
     def reset(self) -> None:
         """Start a fresh model conversation while keeping tools and context.

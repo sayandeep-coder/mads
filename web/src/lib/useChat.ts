@@ -139,6 +139,13 @@ export function useChat(sessionId: string | null, onSessionCreated: (id: string)
     const controller = new AbortController();
     abortRef.current = controller;
 
+    // Set true only by an actual "final_response" event — see
+    // ChatMessage.incomplete. Checked in the `finally` block below to tell
+    // "the reply genuinely finished" apart from "the connection just
+    // stopped sending frames," which looks identical from inside the read
+    // loop (reader.read() returns done:true either way).
+    let gotFinalResponse = false;
+
     const applyEvent = (event: AgentEvent) => {
       if (requestVersion !== requestVersionRef.current) return;
 
@@ -200,6 +207,7 @@ export function useChat(sessionId: string | null, onSessionCreated: (id: string)
           }
 
           if (event.type === "final_response") {
+            gotFinalResponse = true;
             const nextFullText = m.fullText || event.text || "";
             return { ...m, fullText: nextFullText, text: nextFullText, streamDone: true, pending: false };
           }
@@ -280,12 +288,17 @@ export function useChat(sessionId: string | null, onSessionCreated: (id: string)
       if ((err as Error).name !== "AbortError") {
         setError(err instanceof Error ? err.message : "Something went wrong.");
         setMessages((prev) =>
-          prev.map((m) => (m.id === assistantId ? { ...m, pending: false, toolCalls: m.toolCalls.map(tc => tc.status === "running" ? { ...tc, status: "error" } : tc) } : m))
+          prev.map((m) => (m.id === assistantId ? { ...m, pending: false, incomplete: !gotFinalResponse, toolCalls: m.toolCalls.map(tc => tc.status === "running" ? { ...tc, status: "error" } : tc) } : m))
         );
       }
     } finally {
       if (requestVersion === requestVersionRef.current) {
-        setMessages(prev => prev.map(m => m.id === assistantId && m.pending ? { ...m, pending: false, streamDone: true } : m));
+        // Reached when the read loop ends on its own (reader.read() returned
+        // done:true) rather than throwing — which happens just as readily
+        // when the connection was quietly dropped mid-reply as when it
+        // finished normally, so gotFinalResponse is still the only reliable
+        // signal here, same as in the catch block above.
+        setMessages(prev => prev.map(m => m.id === assistantId && m.pending ? { ...m, pending: false, streamDone: true, incomplete: !gotFinalResponse } : m));
         setIsStreaming(false);
         abortRef.current = null;
       }

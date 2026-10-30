@@ -28,6 +28,8 @@ dependencies = [
     "pytesseract>=0.3.13",
     "psycopg[binary]>=3.3.6",
     "redis>=8.1.0",
+    "pgvector>=0.5.1",
+    "psycopg-pool>=3.3.3",
 ]
 
 [project.scripts]

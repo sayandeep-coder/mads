@@ -10,6 +10,7 @@ from adaptive.models import (
     ScoredCandidate,
 )
 from server.db.connection import get_connection
+from server.embeddings import embed_text
 
 _CATEGORY_HEADINGS = {
     FactCategory.IDENTITY: "Identity & Contact Info",
@@ -123,13 +124,16 @@ class AdaptiveProfile:
             )
 
             now = datetime.now(timezone.utc)
+            embedding = embed_text(target.statement)
             cur.execute(
                 """
-                INSERT INTO adaptive_approved_facts (category, statement, confidence, approved_at, source_conversation_ids)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO adaptive_approved_facts
+                    (category, statement, confidence, embedding, approved_at, source_conversation_ids)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (target.category.value, target.statement, target.confidence, now, target.source_conversation_ids),
+                (target.category.value, target.statement, target.confidence, embedding, now,
+                 target.source_conversation_ids),
             )
             fact_id = cur.fetchone()["id"]
 

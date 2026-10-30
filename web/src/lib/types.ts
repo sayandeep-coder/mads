@@ -72,4 +72,11 @@ export interface ChatMessage {
   /** True while the assistant turn is still streaming (tool calls and/or text not finished). */
   pending: boolean;
   files: GeneratedFile[];
+  /** True when the SSE connection ended (closed, dropped, or the server
+   * process died) before a "final_response" event ever arrived — the turn
+   * stopped partway through, not because the reply was actually finished.
+   * A dropped connection can land after some text_delta events already
+   * came through, so this is tracked separately from "is text empty":
+   * a cut-off reply can still have real, if incomplete, content on screen. */
+  incomplete?: boolean;
 }
