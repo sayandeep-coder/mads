@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,10 +13,14 @@ from mcp_servers.servers import context7 as context7_server
 from mcp_servers.servers import fetch as fetch_server
 from mcp_servers.servers import filesystem as filesystem_server
 from mcp_servers.servers import github as github_server
+from mcp_servers.servers import groww as groww_server
 from mcp_servers.servers import maps as maps_server
 from mcp_servers.servers import search as search_server
 from mcp_servers.servers import spotify as spotify_server
+from mcp_servers.servers import swiggy as swiggy_server
 from mcp_servers.servers import youtube as youtube_server
+from mcp_servers.servers import zepto as zepto_server
+from mcp_servers.servers import zomato as zomato_server
 from mcp_servers.servers.browser_control import BrowserControlProvider
 from mcp_servers.servers.excel_control import ExcelControlProvider
 from mcp_servers.servers.google_workspace import GoogleWorkspaceProvider
@@ -49,7 +54,42 @@ KNOWN_SERVER_NAMES = [
     "adaptive",
     "browser_control",
     "excel_control",
+    "swiggy",
+    "zepto",
+    "groww",
+    "zomato",
 ]
+
+# The commerce/brokerage connectors, keyed by id — never auto-connected at
+# startup (see build_providers below), only ever via the Tools page's
+# "Connect" button through server/app.py's on-demand connect endpoint.
+# Centralized here, not duplicated in server/app.py, for the same reason
+# KNOWN_SERVER_NAMES lives here: one place the CLI and web backend both
+# read from instead of two lists that can drift.
+COMMERCE_CONNECTORS = {
+    "swiggy": swiggy_server,
+    "zepto": zepto_server,
+    "groww": groww_server,
+    "zomato": zomato_server,
+}
+
+
+def _has_cached_mcp_remote_token(remote_url: str) -> bool:
+    """Whether `mcp-remote` already has a saved OAuth token for this exact
+    server URL, so reconnecting it needs no browser login — only a first-
+    ever connect (the Tools page's "Connect" button) should ever risk
+    popping one open. `mcp-remote` keys its on-disk token cache by
+    md5(server_url) under ~/.mcp-auth/mcp-remote-v1/<hash>_tokens.json;
+    confirmed empirically against real cached files from this project's
+    own Swiggy/Zepto/Zomato connections, not guessed from its source.
+    This only checks presence, not expiry — an expired/revoked token still
+    counts as "try it," since connect_one's own timeout (20s) catches a
+    stale token the same way it catches a never-authenticated one, falling
+    back to "stays unconnected until the Connect button is clicked again."
+    """
+    token_hash = hashlib.md5(remote_url.encode()).hexdigest()
+    token_path = Path.home() / ".mcp-auth" / "mcp-remote-v1" / f"{token_hash}_tokens.json"
+    return token_path.exists()
 
 
 def build_providers(
@@ -75,6 +115,20 @@ def build_providers(
     from mcp_servers.servers.astrology import AstrologyProvider
     if AstrologyProvider.is_available(settings):
         providers.append(AstrologyProvider(settings))
+    # Swiggy/Zepto/Groww/Zomato: auto-reconnect at startup ONLY if
+    # mcp-remote already has a cached OAuth token for it (a prior
+    # successful "Connect" click, some earlier run) — that reconnect is
+    # silent and near-instant, no browser involved, so it's safe to do
+    # automatically. A never-yet-authenticated connector is NOT added
+    # here; its first connection pops open a real login for a real
+    # account (and two of these place real orders/trades), so that one
+    # only ever happens on an explicit click — the Tools page's "Connect"
+    # button, via POST /api/connectors/{id}/connect in server/app.py
+    # (MCPManager.connect_one). Without the cached-token check, every dev
+    # reload would force re-clicking Connect for everything, every time.
+    for connector_id, connector_module in COMMERCE_CONNECTORS.items():
+        if _has_cached_mcp_remote_token(connector_module.REMOTE_URL):
+            providers.append(StdioToolProvider(connector_id, connector_module.build_server_params(settings)))
 
     # Document generation/reading (PDF, PPTX, Excel, Docs) is no longer an
     # always-on provider — it's registered as skills instead (see

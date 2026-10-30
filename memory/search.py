@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
-from memory.store import InvalidCategoryError, Memory, list_all
-
-_WORD_RE = re.compile(r"[a-z0-9]+")
+from adaptive.models import FactCategory
+from memory.store import Memory, _VALID_CATEGORIES
+from server.db.connection import get_connection
+from server.embeddings import embed_text
 
 # The Adaptive Profile (adaptive/profile.py) is a separate store — facts
 # extracted from imported history and approved by the user — but from the
@@ -25,88 +25,81 @@ class SearchResult:
     source: str = "memory"  # "memory" or "adaptive_profile"
 
 
-def _tokenize(text: str) -> set[str]:
-    return set(_WORD_RE.findall(text.lower()))
-
-
-def _score(query_tokens: set[str], memory: Memory) -> float:
-    if not query_tokens:
-        return 0.0
-
-    content_tokens = _tokenize(memory.content)
-    tag_tokens = _tokenize(" ".join(memory.tags))
-    category_tokens = _tokenize(memory.category)
-
-    # Field-weighted overlap: tags and category are short, deliberate labels,
-    # so a hit there is a stronger signal than a hit buried in free-text content.
-    content_hits = len(query_tokens & content_tokens)
-    tag_hits = len(query_tokens & tag_tokens)
-    category_hits = len(query_tokens & category_tokens)
-
-    return content_hits * 1.0 + tag_hits * 2.0 + category_hits * 1.5
-
-
-def _adaptive_profile_as_memories(category: str | None) -> list[Memory]:
-    # Local import: memory/ has no other dependency on adaptive/, and this
-    # keeps the import lazy in case the adaptive package is ever optional.
-    from adaptive.profile import AdaptiveProfile
-    from adaptive.models import FactCategory
-
-    adaptive_category = None
-    if category is not None:
-        try:
-            adaptive_category = FactCategory(category)
-        except ValueError:
-            # Not one of the adaptive categories (e.g. "person") — the
-            # Adaptive Profile has nothing to contribute for this filter.
-            return []
-
-    facts = AdaptiveProfile().list_approved(category=adaptive_category)
-    return [
-        Memory(
-            id=_ADAPTIVE_ID_OFFSET + fact.id,
-            category=fact.category.value,
-            content=fact.statement,
-            tags=[],
-            created_at=fact.approved_at.isoformat(),
-            updated_at=fact.approved_at.isoformat(),
-        )
-        for fact in facts
-    ]
-
-
 def search_memory(query: str, category: str | None = None, limit: int = 10) -> list[SearchResult]:
-    """Rank stored memories by relevance to a query using field-weighted keyword overlap.
+    """Rank stored memories by semantic similarity to a query.
 
-    Searches both memory.sqlite3 (facts told directly in conversation) and
-    the Adaptive Profile (facts approved from imported history) — the
-    agent shouldn't need to know or care which store a given fact lives in.
-
-    Deterministic and fully local — no embeddings or external services.
-    Swappable for semantic search later without changing this function's
-    signature or the tool surface built on top of it.
+    Embeds the query (gemini-embedding-001) and ranks both memory.sqlite3's
+    successor — the `memories` table — and the Adaptive Profile's
+    `adaptive_approved_facts` by cosine distance via pgvector's `<=>`
+    operator, merging the two into one relevance-ordered list. Replaces
+    the original keyword-overlap scorer: "my partner's name" now finds a
+    memory phrased as "spouse is named ...", which word matching couldn't.
     """
-    query_tokens = _tokenize(query)
+    query_embedding = embed_text(query, task_type="RETRIEVAL_QUERY")
 
-    try:
-        memory_candidates = list_all(category=category)
-    except InvalidCategoryError:
-        # `category` may be valid for the Adaptive Profile's category set
-        # (e.g. "constraint", "identity") but not memory.sqlite3's — that's
-        # not an error, it just means memory.sqlite3 has nothing to
-        # contribute for this filter.
-        memory_candidates = []
+    results: list[SearchResult] = []
 
-    adaptive_candidates = _adaptive_profile_as_memories(category)
+    with get_connection() as conn, conn.cursor() as cur:
+        if category is None or category in _VALID_CATEGORIES:
+            if category is not None:
+                cur.execute(
+                    """
+                    SELECT *, 1 - (embedding <=> %s::vector) AS similarity FROM memories
+                    WHERE embedding IS NOT NULL AND category = %s
+                    ORDER BY embedding <=> %s::vector LIMIT %s
+                    """,
+                    (query_embedding, category, query_embedding, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *, 1 - (embedding <=> %s::vector) AS similarity FROM memories
+                    WHERE embedding IS NOT NULL
+                    ORDER BY embedding <=> %s::vector LIMIT %s
+                    """,
+                    (query_embedding, query_embedding, limit),
+                )
+            for row in cur.fetchall():
+                tags = [t for t in row["tags"].split(",") if t]
+                memory = Memory(
+                    id=row["id"], category=row["category"], content=row["content"],
+                    tags=tags, created_at=row["created_at"], updated_at=row["updated_at"],
+                )
+                results.append(SearchResult(memory=memory, score=row["similarity"], source="memory"))
 
-    scored = [
-        SearchResult(memory=m, score=_score(query_tokens, m), source="memory")
-        for m in memory_candidates
-    ] + [
-        SearchResult(memory=m, score=_score(query_tokens, m), source="adaptive_profile")
-        for m in adaptive_candidates
-    ]
-    relevant = [r for r in scored if r.score > 0]
-    relevant.sort(key=lambda r: r.score, reverse=True)
+        adaptive_category_ok = category is None
+        if category is not None:
+            try:
+                FactCategory(category)
+                adaptive_category_ok = True
+            except ValueError:
+                pass  # Not one of the adaptive categories (e.g. "person") — nothing to contribute.
 
-    return relevant[:limit]
+        if adaptive_category_ok:
+            if category is not None:
+                cur.execute(
+                    """
+                    SELECT *, 1 - (embedding <=> %s::vector) AS similarity FROM adaptive_approved_facts
+                    WHERE embedding IS NOT NULL AND category = %s
+                    ORDER BY embedding <=> %s::vector LIMIT %s
+                    """,
+                    (query_embedding, category, query_embedding, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *, 1 - (embedding <=> %s::vector) AS similarity FROM adaptive_approved_facts
+                    WHERE embedding IS NOT NULL
+                    ORDER BY embedding <=> %s::vector LIMIT %s
+                    """,
+                    (query_embedding, query_embedding, limit),
+                )
+            for row in cur.fetchall():
+                memory = Memory(
+                    id=_ADAPTIVE_ID_OFFSET + row["id"], category=row["category"], content=row["statement"],
+                    tags=[], created_at=row["approved_at"].isoformat(), updated_at=row["approved_at"].isoformat(),
+                )
+                results.append(SearchResult(memory=memory, score=row["similarity"], source="adaptive_profile"))
+
+    results.sort(key=lambda r: r.score, reverse=True)
+    return results[:limit]

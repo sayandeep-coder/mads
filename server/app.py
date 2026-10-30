@@ -18,6 +18,7 @@ from sse_starlette.sse import EventSourceResponse
 from adaptive.profile import AdaptiveProfile
 from agent.agent import Agent
 from agent.session import (
+    COMMERCE_CONNECTORS,
     Session,
     build_agent_for_session,
     build_browser_session,
@@ -27,9 +28,11 @@ from agent.session import (
 )
 from agent.system_prompt import apply_mode
 from config.settings import get_settings
+from mcp_servers.manager import StdioToolProvider
 from planner.planner import Planner
 from server.browser_bridge import browser_bridge, excel_bridge
 from server.code_runner import handle_code_run
+from server.db.connection import get_db_pool
 from server.store import chat_store
 
 logger = logging.getLogger(__name__)
@@ -63,6 +66,12 @@ async def lifespan(app: FastAPI):
     """
     base_settings = get_settings()
     _configure_logging(base_settings.log_level)
+
+    # Opens the Postgres connection pool's first connection now (the one
+    # expensive TLS handshake to Neon — see server/db/connection.py) so
+    # it's the server's own startup that pays for it, not the first
+    # request to actually hit the database once Mads is already "ready".
+    get_db_pool().wait()
 
     planner = Planner()
     adaptive_profile = AdaptiveProfile()
@@ -185,6 +194,39 @@ async def status():
         "connected_servers": session.mcp_manager.connected_servers,
         "active_project": active_project.name if active_project else None,
     }
+
+
+@app.post("/api/connectors/{connector_id}/connect")
+async def connect_connector(connector_id: str):
+    """On-demand connect for the commerce/brokerage connectors (Swiggy,
+    Zepto, Groww, Zomato) — the Tools page's "Connect" button. These are
+    never in the startup provider list (see agent/session.py's
+    build_providers) specifically so this is the only way they ever
+    connect: each one's first connection opens a real OAuth login in a
+    browser on this machine for the matching real account.
+
+    Connecting mid-session means tools that already-built Agent instances
+    (the main session's, and every live per-chat-session Agent) snapshotted
+    at construction are now stale — refresh_base_tools() on each pulls the
+    newly connected provider's tools in without losing conversation state.
+    """
+    connector_module = COMMERCE_CONNECTORS.get(connector_id)
+    if connector_module is None:
+        raise HTTPException(status_code=404, detail=f"Unknown connector {connector_id!r}")
+
+    session: Session = _state["session"]  # type: ignore[assignment]
+    base_settings = _state["base_settings"]
+
+    provider = StdioToolProvider(connector_id, connector_module.build_server_params(base_settings))
+    connected, error = await session.mcp_manager.connect_one(provider)
+
+    if connected:
+        session.agent.refresh_base_tools()
+        agents: dict[str, Agent] = _state["chat_agents"]  # type: ignore[assignment]
+        for agent in agents.values():
+            agent.refresh_base_tools()
+
+    return {"connected": connected, "error": error}
 
 
 @app.get("/api/sessions")
