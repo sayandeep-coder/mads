@@ -32,16 +32,6 @@ _SUPPORTED_SCHEMA_KEYS = {
 
 def _clean_schema(schema: dict) -> dict:
     cleaned = {k: v for k, v in schema.items() if k in _SUPPORTED_SCHEMA_KEYS}
-
-    # "required" only means anything on an object schema ("only allowed for
-    # OBJECT type" is literally the API's own rejection message) — a real
-    # external tool schema has shipped `required` on a branch with no
-    # `type: object` (or no `type` at all post-cleaning). Rather than try
-    # to infer whether a given branch "counts" as an object, drop `required`
-    # wherever the schema isn't explicitly typed as one; Gemini still
-    # enforces nothing is silently optional-vs-required beyond what the
-    # model infers from `description`, but that's a usability tradeoff, not
-    # a correctness one — far better than crashing the whole request.
     if str(cleaned.get("type", "")).lower() != "object" and "required" in cleaned:
         del cleaned["required"]
 

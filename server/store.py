@@ -38,6 +38,13 @@ class ChatStore:
         if cached is not None:
             return cached
 
+        # Snapshotted before the Postgres read, not after — a concurrent
+        # write that invalidates the cache while this read is still in
+        # flight bumps the generation, which makes the write-back below a
+        # no-op instead of caching this now-possibly-stale result (audit
+        # finding F-02: cache-aside write-after-invalidate race).
+        generation = cache.get_current_generation()
+
         with get_connection() as conn, conn.cursor() as cur:
             cur.execute(
                 """
@@ -50,7 +57,7 @@ class ChatStore:
             )
             sessions = [dict(row) for row in cur.fetchall()]
 
-        cache.set_cached_sessions(sessions)
+        cache.set_cached_sessions_if_current(sessions, generation)
         return sessions
 
     def get_session(self, session_id: str) -> dict | None:
